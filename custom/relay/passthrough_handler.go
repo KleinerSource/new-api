@@ -20,8 +20,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// PassthroughHelperWithUsage 传透模式处理器（带 usage 提取）
-func PassthroughHelperWithUsage(c *gin.Context, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
+// PassthroughHelperWithUsage 传透模式处理器（带 usage 和内容提取）
+func PassthroughHelperWithUsage(c *gin.Context, info *relaycommon.RelayInfo) (*PassthroughResult, *types.NewAPIError) {
 	info.InitChannelMeta(c)
 
 	adaptor := relay.GetAdaptor(info.ApiType)
@@ -60,8 +60,8 @@ func PassthroughHelperWithUsage(c *gin.Context, info *relaycommon.RelayInfo) (*d
 	return passthroughResponseWithUsage(c, httpResp, info)
 }
 
-// passthroughResponseWithUsage 透传响应并提取 usage 信息
-func passthroughResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
+// passthroughResponseWithUsage 透传响应并提取 usage 和内容信息
+func passthroughResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*PassthroughResult, *types.NewAPIError) {
 	if resp == nil || resp.Body == nil {
 		return nil, types.NewOpenAIError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
@@ -81,8 +81,8 @@ func passthroughResponseWithUsage(c *gin.Context, resp *http.Response, info *rel
 	return passthroughNonStreamResponseWithUsage(c, resp, info)
 }
 
-// passthroughStreamResponseWithUsage 流式响应透传（带 usage 提取）
-func passthroughStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
+// passthroughStreamResponseWithUsage 流式响应透传（带 usage 和内容提取）
+func passthroughStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*PassthroughResult, *types.NewAPIError) {
 	helper.SetEventStreamHeaders(c)
 
 	flusher, ok := c.Writer.(http.Flusher)
@@ -93,7 +93,7 @@ func passthroughStreamResponseWithUsage(c *gin.Context, resp *http.Response, inf
 			return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 		}
 		c.Writer.Write(responseBody)
-		return extractUsageFromStreamData(responseBody), nil
+		return GetPassthroughResult(responseBody, true), nil
 	}
 
 	var allData bytes.Buffer
@@ -117,12 +117,12 @@ func passthroughStreamResponseWithUsage(c *gin.Context, resp *http.Response, inf
 		}
 	}
 
-	usage := extractUsageFromStreamData(allData.Bytes())
-	return usage, nil
+	result := GetPassthroughResult(allData.Bytes(), true)
+	return result, nil
 }
 
-// passthroughNonStreamResponseWithUsage 非流式响应透传（带 usage 提取）
-func passthroughNonStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
+// passthroughNonStreamResponseWithUsage 非流式响应透传（带 usage 和内容提取）
+func passthroughNonStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*PassthroughResult, *types.NewAPIError) {
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
@@ -136,46 +136,89 @@ func passthroughNonStreamResponseWithUsage(c *gin.Context, resp *http.Response, 
 
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 
-	usage := GetPassthroughUsage(responseBody, info)
-	return usage, nil
+	result := GetPassthroughResult(responseBody, false)
+	return result, nil
 }
 
-// extractUsageFromStreamData 从流式数据中提取 usage 信息
-func extractUsageFromStreamData(data []byte) *dto.Usage {
+// PassthroughResult 传透模式结果，包含 usage 和响应内容
+type PassthroughResult struct {
+	Usage           *dto.Usage
+	ResponseContent string // 响应中的文本内容，用于本地计算 token
+}
+
+// extractUsageAndContentFromStreamData 从流式数据中提取 usage 和内容
+func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
+	result := &PassthroughResult{}
+	var contentBuilder bytes.Buffer
+
 	lines := bytes.Split(data, []byte("\n"))
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := bytes.TrimSpace(lines[i])
-		if bytes.HasPrefix(line, []byte("data: ")) {
-			jsonData := bytes.TrimPrefix(line, []byte("data: "))
-			if bytes.Equal(jsonData, []byte("[DONE]")) {
-				continue
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data: ")) {
+			continue
+		}
+		jsonData := bytes.TrimPrefix(line, []byte("data: "))
+		if bytes.Equal(jsonData, []byte("[DONE]")) {
+			continue
+		}
+
+		var streamResp struct {
+			Usage   *dto.Usage `json:"usage"`
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := common.Unmarshal(jsonData, &streamResp); err == nil {
+			if streamResp.Usage != nil && (streamResp.Usage.PromptTokens > 0 || streamResp.Usage.CompletionTokens > 0) {
+				result.Usage = streamResp.Usage
 			}
-			var streamResp struct {
-				Usage *dto.Usage `json:"usage"`
-			}
-			if err := common.Unmarshal(jsonData, &streamResp); err == nil && streamResp.Usage != nil {
-				return streamResp.Usage
+			for _, choice := range streamResp.Choices {
+				if choice.Delta.Content != "" {
+					contentBuilder.WriteString(choice.Delta.Content)
+				}
 			}
 		}
 	}
-	return nil
+
+	result.ResponseContent = contentBuilder.String()
+	return result
 }
 
-// GetPassthroughUsage 从响应中提取 usage 信息
-func GetPassthroughUsage(responseBody []byte, info *relaycommon.RelayInfo) *dto.Usage {
-	var simpleResponse struct {
-		Usage *dto.Usage `json:"usage"`
+// extractUsageAndContentFromResponse 从非流式响应中提取 usage 和内容
+func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult {
+	result := &PassthroughResult{}
+
+	var response struct {
+		Usage   *dto.Usage `json:"usage"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
 	}
 
-	if err := common.Unmarshal(responseBody, &simpleResponse); err == nil && simpleResponse.Usage != nil {
-		return simpleResponse.Usage
+	if err := common.Unmarshal(responseBody, &response); err == nil {
+		if response.Usage != nil && (response.Usage.PromptTokens > 0 || response.Usage.CompletionTokens > 0) {
+			result.Usage = response.Usage
+		}
+		for _, choice := range response.Choices {
+			if choice.Message.Content != "" {
+				result.ResponseContent += choice.Message.Content
+			}
+		}
 	}
 
-	return &dto.Usage{
-		PromptTokens:     info.GetEstimatePromptTokens(),
-		CompletionTokens: 0,
-		TotalTokens:      info.GetEstimatePromptTokens(),
+	return result
+}
+
+// GetPassthroughResult 从响应中提取完整结果
+func GetPassthroughResult(responseBody []byte, isStream bool) *PassthroughResult {
+	if isStream {
+		return extractUsageAndContentFromStreamData(responseBody)
 	}
+	return extractUsageAndContentFromResponse(responseBody)
 }
 
 // DoPassthroughRequest 执行传透请求（供外部调用）

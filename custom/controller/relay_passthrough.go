@@ -12,7 +12,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/custom/relay"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
@@ -39,7 +38,6 @@ func RelayPassthrough(c *gin.Context) {
 	requestId := c.GetString(common.RequestIdKey)
 
 	var newAPIError *types.NewAPIError
-	var usage *dto.Usage
 
 	defer func() {
 		if newAPIError != nil {
@@ -128,10 +126,11 @@ func RelayPassthrough(c *gin.Context) {
 		}
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(requestBody))
 
-		usage, newAPIError = relay.PassthroughHelperWithUsage(c, relayInfo)
+		var passthroughResult *relay.PassthroughResult
+		passthroughResult, newAPIError = relay.PassthroughHelperWithUsage(c, relayInfo)
 
 		if newAPIError == nil {
-			postPassthroughConsumeQuotaWithUsage(c, relayInfo, usage, estimatedInputTokens)
+			postPassthroughConsumeQuotaWithResult(c, relayInfo, passthroughResult, estimatedInputTokens)
 			return
 		}
 
@@ -278,22 +277,35 @@ func processChannelError(c *gin.Context, channelErr types.ChannelError, apiErr *
 	logger.LogError(c, fmt.Sprintf("channel %d (%s) error: %s", channelErr.ChannelId, channelErr.ChannelName, apiErr.Error()))
 }
 
-// postPassthroughConsumeQuotaWithUsage 传透模式的消费记录
-func postPassthroughConsumeQuotaWithUsage(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, estimatedInputTokens int) {
+// postPassthroughConsumeQuotaWithResult 传透模式的消费记录
+func postPassthroughConsumeQuotaWithResult(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, result *relay.PassthroughResult, estimatedInputTokens int) {
 	useTimeSeconds := time.Now().Unix() - relayInfo.StartTime.Unix()
 	tokenName := ctx.GetString("token_name")
 
 	var promptTokens, completionTokens int
 	var logContent string
 
-	if usage != nil && (usage.PromptTokens > 0 || usage.CompletionTokens > 0) {
-		promptTokens = usage.PromptTokens
-		completionTokens = usage.CompletionTokens
+	// 判断上游是否返回有效的 usage
+	hasValidUsage := result != nil && result.Usage != nil &&
+		(result.Usage.PromptTokens > 0 || result.Usage.CompletionTokens > 0)
+
+	if hasValidUsage {
+		// 使用上游提供的 usage
+		promptTokens = result.Usage.PromptTokens
+		completionTokens = result.Usage.CompletionTokens
 		logContent = "传透模式（上游计费）"
 	} else {
+		// 上游无 usage，使用本地估算
 		promptTokens = estimatedInputTokens
-		completionTokens = 0
-		logContent = "传透模式（上游无 usage，本地估算输入）"
+
+		// 从响应内容计算输出 token
+		if result != nil && result.ResponseContent != "" {
+			completionTokens = service.CountTextToken(result.ResponseContent, relayInfo.OriginModelName)
+			logContent = "传透模式（上游无 usage，本地估算）"
+		} else {
+			completionTokens = 0
+			logContent = "传透模式（上游无 usage，无响应内容）"
+		}
 	}
 
 	modelRatio := relayInfo.PriceData.ModelRatio
@@ -345,8 +357,8 @@ func postPassthroughConsumeQuotaWithUsage(ctx *gin.Context, relayInfo *relaycomm
 
 	other := service.GenerateTextOtherInfo(ctx, relayInfo, modelRatio, groupRatio, completionRatio, 0, 0.0, modelPrice, userGroupRatio)
 	other["passthrough"] = true
-	if usage != nil {
-		other["usage"] = usage
+	if result != nil && result.Usage != nil {
+		other["usage"] = result.Usage
 	}
 
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
