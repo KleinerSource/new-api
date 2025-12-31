@@ -154,10 +154,14 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 	lines := bytes.Split(data, []byte("\n"))
 	for _, line := range lines {
 		line = bytes.TrimSpace(line)
-		if !bytes.HasPrefix(line, []byte("data: ")) {
+		var jsonData []byte
+		if bytes.HasPrefix(line, []byte("data: ")) {
+			jsonData = bytes.TrimPrefix(line, []byte("data: "))
+		} else if bytes.HasPrefix(line, []byte("{")) {
+			jsonData = line
+		} else {
 			continue
 		}
-		jsonData := bytes.TrimPrefix(line, []byte("data: "))
 		if bytes.Equal(jsonData, []byte("[DONE]")) {
 			continue
 		}
@@ -166,6 +170,10 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 		var streamResp struct {
 			Usage      *dto.Usage `json:"usage"`
 			TokenUsage *dto.Usage `json:"token_usage"`
+			Text       string     `json:"text"`
+			Nodes      []struct {
+				Content string `json:"content"`
+			} `json:"nodes"`
 			Choices    []struct {
 				Delta struct {
 					Content string `json:"content"`
@@ -181,12 +189,26 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 				result.Usage = streamResp.TokenUsage
 			}
 			// 累积所有 delta.content 与 text
+			hasChunkContent := false
+			if streamResp.Text != "" {
+				contentBuilder.WriteString(streamResp.Text)
+				hasChunkContent = true
+			}
 			for _, choice := range streamResp.Choices {
 				if choice.Delta.Content != "" {
 					contentBuilder.WriteString(choice.Delta.Content)
+					hasChunkContent = true
 				}
 				if choice.Text != "" {
 					contentBuilder.WriteString(choice.Text)
+					hasChunkContent = true
+				}
+			}
+			if !hasChunkContent {
+				for _, node := range streamResp.Nodes {
+					if node.Content != "" {
+						contentBuilder.WriteString(node.Content)
+					}
 				}
 			}
 		}
@@ -214,6 +236,10 @@ func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult 
 	var response struct {
 		Usage      *dto.Usage `json:"usage"`
 		TokenUsage *dto.Usage `json:"token_usage"`
+		Text       string     `json:"text"`
+		Nodes      []struct {
+			Content string `json:"content"`
+		} `json:"nodes"`
 		Choices    []struct {
 			Message struct {
 				Content string `json:"content"`
@@ -229,12 +255,26 @@ func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult 
 		} else if response.TokenUsage != nil && (response.TokenUsage.PromptTokens > 0 || response.TokenUsage.CompletionTokens > 0) {
 			result.Usage = response.TokenUsage
 		}
+		hasResponseContent := false
+		if response.Text != "" {
+			result.ResponseContent += response.Text
+			hasResponseContent = true
+		}
 		for _, choice := range response.Choices {
 			if choice.Message.Content != "" {
 				result.ResponseContent += choice.Message.Content
+				hasResponseContent = true
 			}
 			if choice.Text != "" {
 				result.ResponseContent += choice.Text
+				hasResponseContent = true
+			}
+		}
+		if !hasResponseContent {
+			for _, node := range response.Nodes {
+				if node.Content != "" {
+					result.ResponseContent += node.Content
+				}
 			}
 		}
 	}
