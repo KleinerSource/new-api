@@ -47,11 +47,7 @@ func GetTokenBalance(c *gin.Context) {
 	var remainAmount float64
 
 	if token.UnlimitedQuota {
-		// unlimited_quota 为 true，显示 token 的 remain_quota
-		remainQuota = token.RemainQuota
-		remainAmount = float64(token.RemainQuota) / common.QuotaPerUnit
-	} else {
-		// unlimited_quota 为 false，显示用户总金额
+		// unlimited_quota 为 true，token 无限额度，显示用户总金额
 		userQuota, err := model.GetUserQuota(token.UserId, true)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
@@ -62,6 +58,10 @@ func GetTokenBalance(c *gin.Context) {
 		}
 		remainQuota = userQuota
 		remainAmount = float64(userQuota) / common.QuotaPerUnit
+	} else {
+		// unlimited_quota 为 false，token 有限额度，显示 token 的 remain_quota
+		remainQuota = token.RemainQuota
+		remainAmount = float64(token.RemainQuota) / common.QuotaPerUnit
 	}
 
 	// 获取状态文本
