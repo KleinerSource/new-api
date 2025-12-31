@@ -150,38 +150,38 @@ func RelayPassthrough(c *gin.Context) {
 
 // genPassthroughRelayInfo 生成传透模式的 RelayInfo
 func genPassthroughRelayInfo(c *gin.Context, modelName string, isStream bool) *relaycommon.RelayInfo {
-	tokenGroup := common.GetContextKeyString(c, constant.ContextKeyTokenGroup)
-	if tokenGroup == "" {
-		tokenGroup = common.GetContextKeyString(c, constant.ContextKeyUserGroup)
-	}
+	// 设置必要的上下文信息，供 GenRelayInfoOpenAI 使用
+	c.Set(string(constant.ContextKeyOriginalModel), modelName)
 
-	startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
-	if startTime.IsZero() {
-		startTime = time.Now()
-	}
+	// 创建一个简单的 request 实现来传递 stream 信息
+	mockRequest := &passthroughRequest{stream: isStream}
 
-	info := &relaycommon.RelayInfo{
-		UserId:          common.GetContextKeyInt(c, constant.ContextKeyUserId),
-		UsingGroup:      common.GetContextKeyString(c, constant.ContextKeyUsingGroup),
-		UserGroup:       common.GetContextKeyString(c, constant.ContextKeyUserGroup),
-		UserQuota:       common.GetContextKeyInt(c, constant.ContextKeyUserQuota),
-		UserEmail:       common.GetContextKeyString(c, constant.ContextKeyUserEmail),
-		OriginModelName: modelName,
-		TokenId:         common.GetContextKeyInt(c, constant.ContextKeyTokenId),
-		TokenKey:        common.GetContextKeyString(c, constant.ContextKeyTokenKey),
-		TokenUnlimited:  common.GetContextKeyBool(c, constant.ContextKeyTokenUnlimited),
-		TokenGroup:      tokenGroup,
-		IsStream:        isStream,
-		StartTime:       startTime,
-		RelayFormat:     types.RelayFormatOpenAI,
-		RequestURLPath:  "/v1/chat/completions",
-	}
-
-	// 初始化首字时间相关字段（内联实现，避免修改上游 relay_info.go）
-	info.FirstResponseTime = startTime.Add(-time.Second)
-	info.InitChannelMeta(c)
+	// 使用标准方法生成 RelayInfo，确保 isFirstResponse 等私有字段正确初始化
+	info := relaycommon.GenRelayInfoOpenAI(c, mockRequest)
+	info.OriginModelName = modelName
+	info.IsStream = isStream
+	info.RequestURLPath = "/chat-stream"
 
 	return info
+}
+
+// passthroughRequest 实现 dto.Request 接口的最小实现
+type passthroughRequest struct {
+	stream bool
+}
+
+func (r *passthroughRequest) IsStream(c *gin.Context) bool {
+	return r.stream
+}
+
+func (r *passthroughRequest) GetTokenCountMeta() *types.TokenCountMeta {
+	return &types.TokenCountMeta{
+		TokenType: types.TokenTypeTokenizer,
+	}
+}
+
+func (r *passthroughRequest) SetModelName(modelName string) {
+	// 不需要实现
 }
 
 // getPassthroughChannel 获取传透模式的渠道
