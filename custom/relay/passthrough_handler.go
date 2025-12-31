@@ -162,7 +162,7 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 			continue
 		}
 
-		// 支持多种 usage 字段名：usage, token_usage
+		// 支持 usage 和 token_usage 两种字段名
 		var streamResp struct {
 			Usage      *dto.Usage `json:"usage"`
 			TokenUsage *dto.Usage `json:"token_usage"`
@@ -170,13 +170,7 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 				Delta struct {
 					Content string `json:"content"`
 				} `json:"delta"`
-				// 支持部分上游直接返回 text 字段
-				Text string `json:"text"`
 			} `json:"choices"`
-			// 支持部分上游直接在根级别返回 content
-			Content string `json:"content"`
-			// 支持部分上游返回 response 字段
-			Response string `json:"response"`
 		}
 		if err := common.Unmarshal(jsonData, &streamResp); err == nil {
 			// 优先使用 usage，其次使用 token_usage
@@ -185,26 +179,27 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 			} else if streamResp.TokenUsage != nil && (streamResp.TokenUsage.PromptTokens > 0 || streamResp.TokenUsage.CompletionTokens > 0) {
 				result.Usage = streamResp.TokenUsage
 			}
-
-			// 提取内容：支持多种格式
+			// 累积所有 delta.content
 			for _, choice := range streamResp.Choices {
 				if choice.Delta.Content != "" {
 					contentBuilder.WriteString(choice.Delta.Content)
 				}
-				if choice.Text != "" {
-					contentBuilder.WriteString(choice.Text)
-				}
-			}
-			if streamResp.Content != "" {
-				contentBuilder.WriteString(streamResp.Content)
-			}
-			if streamResp.Response != "" {
-				contentBuilder.WriteString(streamResp.Response)
 			}
 		}
 	}
 
 	result.ResponseContent = contentBuilder.String()
+
+	// 调试日志
+	if common.DebugEnabled {
+		common.SysLog(fmt.Sprintf("[Passthrough Stream] ResponseContent length: %d, has usage: %v",
+			len(result.ResponseContent), result.Usage != nil))
+		if result.Usage != nil {
+			common.SysLog(fmt.Sprintf("[Passthrough Stream] Usage: prompt=%d, completion=%d",
+				result.Usage.PromptTokens, result.Usage.CompletionTokens))
+		}
+	}
+
 	return result
 }
 
@@ -212,7 +207,6 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult {
 	result := &PassthroughResult{}
 
-	// 支持多种 usage 字段名和内容格式
 	var response struct {
 		Usage      *dto.Usage `json:"usage"`
 		TokenUsage *dto.Usage `json:"token_usage"`
@@ -220,14 +214,7 @@ func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult 
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
-			Text string `json:"text"`
 		} `json:"choices"`
-		// 支持部分上游直接在根级别返回 content
-		Content string `json:"content"`
-		// 支持部分上游返回 response 字段
-		Response string `json:"response"`
-		// 支持部分上游返回 output 字段
-		Output string `json:"output"`
 	}
 
 	if err := common.Unmarshal(responseBody, &response); err == nil {
@@ -237,27 +224,21 @@ func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult 
 		} else if response.TokenUsage != nil && (response.TokenUsage.PromptTokens > 0 || response.TokenUsage.CompletionTokens > 0) {
 			result.Usage = response.TokenUsage
 		}
-
-		// 提取内容：支持多种格式
-		var contentBuilder bytes.Buffer
 		for _, choice := range response.Choices {
 			if choice.Message.Content != "" {
-				contentBuilder.WriteString(choice.Message.Content)
-			}
-			if choice.Text != "" {
-				contentBuilder.WriteString(choice.Text)
+				result.ResponseContent += choice.Message.Content
 			}
 		}
-		if response.Content != "" {
-			contentBuilder.WriteString(response.Content)
+	}
+
+	// 调试日志
+	if common.DebugEnabled {
+		common.SysLog(fmt.Sprintf("[Passthrough NonStream] ResponseContent length: %d, has usage: %v",
+			len(result.ResponseContent), result.Usage != nil))
+		if result.Usage != nil {
+			common.SysLog(fmt.Sprintf("[Passthrough NonStream] Usage: prompt=%d, completion=%d",
+				result.Usage.PromptTokens, result.Usage.CompletionTokens))
 		}
-		if response.Response != "" {
-			contentBuilder.WriteString(response.Response)
-		}
-		if response.Output != "" {
-			contentBuilder.WriteString(response.Output)
-		}
-		result.ResponseContent = contentBuilder.String()
 	}
 
 	return result

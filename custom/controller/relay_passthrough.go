@@ -289,6 +289,20 @@ func postPassthroughConsumeQuotaWithResult(ctx *gin.Context, relayInfo *relaycom
 	hasValidUsage := result != nil && result.Usage != nil &&
 		(result.Usage.PromptTokens > 0 || result.Usage.CompletionTokens > 0)
 
+	// 调试日志：输出 result 状态
+	if common.DebugEnabled {
+		if result != nil {
+			logger.LogDebug(ctx, fmt.Sprintf("[Passthrough Billing] hasValidUsage=%v, ResponseContent length=%d",
+				hasValidUsage, len(result.ResponseContent)))
+			if result.Usage != nil {
+				logger.LogDebug(ctx, fmt.Sprintf("[Passthrough Billing] Upstream usage: prompt=%d, completion=%d",
+					result.Usage.PromptTokens, result.Usage.CompletionTokens))
+			}
+		} else {
+			logger.LogDebug(ctx, "[Passthrough Billing] result is nil")
+		}
+	}
+
 	if hasValidUsage {
 		// 使用上游提供的 usage
 		promptTokens = result.Usage.PromptTokens
@@ -302,9 +316,20 @@ func postPassthroughConsumeQuotaWithResult(ctx *gin.Context, relayInfo *relaycom
 		if result != nil && result.ResponseContent != "" {
 			completionTokens = service.CountTextToken(result.ResponseContent, relayInfo.OriginModelName)
 			logContent = "传透模式（上游无 usage，本地估算）"
+
+			// 调试日志：输出本地计算结果
+			if common.DebugEnabled {
+				logger.LogDebug(ctx, fmt.Sprintf("[Passthrough Billing] Local token count: prompt=%d, completion=%d, model=%s",
+					promptTokens, completionTokens, relayInfo.OriginModelName))
+			}
 		} else {
 			completionTokens = 0
 			logContent = "传透模式（上游无 usage，无响应内容）"
+
+			// 调试日志：无响应内容
+			if common.DebugEnabled {
+				logger.LogDebug(ctx, "[Passthrough Billing] No response content for local token calculation")
+			}
 		}
 	}
 
