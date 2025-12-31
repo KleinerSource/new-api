@@ -162,22 +162,44 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 			continue
 		}
 
+		// 支持多种 usage 字段名：usage, token_usage
 		var streamResp struct {
-			Usage   *dto.Usage `json:"usage"`
-			Choices []struct {
+			Usage      *dto.Usage `json:"usage"`
+			TokenUsage *dto.Usage `json:"token_usage"`
+			Choices    []struct {
 				Delta struct {
 					Content string `json:"content"`
 				} `json:"delta"`
+				// 支持部分上游直接返回 text 字段
+				Text string `json:"text"`
 			} `json:"choices"`
+			// 支持部分上游直接在根级别返回 content
+			Content string `json:"content"`
+			// 支持部分上游返回 response 字段
+			Response string `json:"response"`
 		}
 		if err := common.Unmarshal(jsonData, &streamResp); err == nil {
+			// 优先使用 usage，其次使用 token_usage
 			if streamResp.Usage != nil && (streamResp.Usage.PromptTokens > 0 || streamResp.Usage.CompletionTokens > 0) {
 				result.Usage = streamResp.Usage
+			} else if streamResp.TokenUsage != nil && (streamResp.TokenUsage.PromptTokens > 0 || streamResp.TokenUsage.CompletionTokens > 0) {
+				result.Usage = streamResp.TokenUsage
 			}
+
+			// 提取内容：支持多种格式
 			for _, choice := range streamResp.Choices {
 				if choice.Delta.Content != "" {
 					contentBuilder.WriteString(choice.Delta.Content)
 				}
+				if choice.Text != "" {
+					contentBuilder.WriteString(choice.Text)
+				}
+			}
+			if streamResp.Content != "" {
+				contentBuilder.WriteString(streamResp.Content)
+			}
+			if streamResp.Response != "" {
+				contentBuilder.WriteString(streamResp.Response)
 			}
 		}
 	}
@@ -190,24 +212,52 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult {
 	result := &PassthroughResult{}
 
+	// 支持多种 usage 字段名和内容格式
 	var response struct {
-		Usage   *dto.Usage `json:"usage"`
-		Choices []struct {
+		Usage      *dto.Usage `json:"usage"`
+		TokenUsage *dto.Usage `json:"token_usage"`
+		Choices    []struct {
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
+			Text string `json:"text"`
 		} `json:"choices"`
+		// 支持部分上游直接在根级别返回 content
+		Content string `json:"content"`
+		// 支持部分上游返回 response 字段
+		Response string `json:"response"`
+		// 支持部分上游返回 output 字段
+		Output string `json:"output"`
 	}
 
 	if err := common.Unmarshal(responseBody, &response); err == nil {
+		// 优先使用 usage，其次使用 token_usage
 		if response.Usage != nil && (response.Usage.PromptTokens > 0 || response.Usage.CompletionTokens > 0) {
 			result.Usage = response.Usage
+		} else if response.TokenUsage != nil && (response.TokenUsage.PromptTokens > 0 || response.TokenUsage.CompletionTokens > 0) {
+			result.Usage = response.TokenUsage
 		}
+
+		// 提取内容：支持多种格式
+		var contentBuilder bytes.Buffer
 		for _, choice := range response.Choices {
 			if choice.Message.Content != "" {
-				result.ResponseContent += choice.Message.Content
+				contentBuilder.WriteString(choice.Message.Content)
+			}
+			if choice.Text != "" {
+				contentBuilder.WriteString(choice.Text)
 			}
 		}
+		if response.Content != "" {
+			contentBuilder.WriteString(response.Content)
+		}
+		if response.Response != "" {
+			contentBuilder.WriteString(response.Response)
+		}
+		if response.Output != "" {
+			contentBuilder.WriteString(response.Output)
+		}
+		result.ResponseContent = contentBuilder.String()
 	}
 
 	return result
