@@ -89,9 +89,6 @@ func SetRelayRouter(router *gin.Engine) {
 			controller.Relay(c, types.RelayFormatOpenAI)
 		})
 
-		// passthrough mode - 传透模式，直接转发请求到上游，支持流式响应
-		httpRouter.POST("/chat-stream", controller.RelayPassthrough)
-
 		// response related routes
 		httpRouter.POST("/responses", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatOpenAIResponses)
@@ -181,15 +178,6 @@ func SetRelayRouter(router *gin.Engine) {
 		relayGeminiRouter.POST("/models/*path", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatGemini)
 		})
-	}
-
-	// /chat-stream - 传透模式路由
-	chatStreamRouter := router.Group("/chat-stream")
-	chatStreamRouter.Use(middleware.TokenAuth())
-	chatStreamRouter.Use(middleware.ModelRequestRateLimit())
-	chatStreamRouter.Use(middleware.Distribute())
-	{
-		chatStreamRouter.POST("", controller.RelayPassthrough)
 	}
 }
 

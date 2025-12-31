@@ -12,7 +12,6 @@ import (
 
 // GetTokenBalance 获取 Token 余额信息
 // GET /usage/api/balance
-// 与 GetTokenUsage 保持完全一致的实现方式
 func GetTokenBalance(c *gin.Context) {
 	authHeader := c.GetHeader("Authorization")
 	if authHeader == "" {
