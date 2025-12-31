@@ -170,6 +170,7 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 				Delta struct {
 					Content string `json:"content"`
 				} `json:"delta"`
+				Text string `json:"text"`
 			} `json:"choices"`
 		}
 		if err := common.Unmarshal(jsonData, &streamResp); err == nil {
@@ -179,10 +180,13 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 			} else if streamResp.TokenUsage != nil && (streamResp.TokenUsage.PromptTokens > 0 || streamResp.TokenUsage.CompletionTokens > 0) {
 				result.Usage = streamResp.TokenUsage
 			}
-			// 累积所有 delta.content
+			// 累积所有 delta.content 与 text
 			for _, choice := range streamResp.Choices {
 				if choice.Delta.Content != "" {
 					contentBuilder.WriteString(choice.Delta.Content)
+				}
+				if choice.Text != "" {
+					contentBuilder.WriteString(choice.Text)
 				}
 			}
 		}
@@ -214,6 +218,7 @@ func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult 
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
+			Text string `json:"text"`
 		} `json:"choices"`
 	}
 
@@ -227,6 +232,9 @@ func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult 
 		for _, choice := range response.Choices {
 			if choice.Message.Content != "" {
 				result.ResponseContent += choice.Message.Content
+			}
+			if choice.Text != "" {
+				result.ResponseContent += choice.Text
 			}
 		}
 	}
@@ -256,4 +264,3 @@ func GetPassthroughResult(responseBody []byte, isStream bool) *PassthroughResult
 func DoPassthroughRequest(adaptor channel.Adaptor, c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (*http.Response, error) {
 	return channel.DoApiRequest(adaptor, c, info, requestBody)
 }
-
