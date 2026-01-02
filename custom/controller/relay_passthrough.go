@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -315,19 +316,40 @@ func selectChannelByPriorityAndWeight(channels []*model.Channel, retry int) (*mo
 func getPassthroughChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
 	if _, ok := c.Get("specific_channel_id"); ok {
 		// 直接指定渠道的情况，按数据库标签校验
-		channelId := c.GetInt("channel_id")
-		if channelId == 0 {
+		channelIdStr := common.GetContextKeyString(c, constant.ContextKeyTokenSpecificChannelId)
+		if channelIdStr == "" {
 			return nil, types.NewError(errors.New("channel id is required"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
+		channelId, err := strconv.Atoi(channelIdStr)
+		if err != nil {
+			return nil, types.NewError(errors.New("invalid channel id"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 		}
 		channelFromDB, err := model.CacheGetChannel(channelId)
 		if err != nil {
 			return nil, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		}
+		tokenGroup := retryParam.TokenGroup
+		if tokenGroup != "" && tokenGroup != "auto" {
+			groupMatched := false
+			for _, group := range channelFromDB.GetGroups() {
+				if group == tokenGroup {
+					groupMatched = true
+					break
+				}
+			}
+			if !groupMatched {
+				return nil, types.NewError(errors.New("该渠道不属于当前分组"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+			}
 		}
 		if channelFromDB.Status != common.ChannelStatusEnabled {
 			return nil, types.NewError(errors.New("该渠道已被禁用"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 		}
 		if !isBugmentChannel(channelFromDB) {
 			return nil, types.NewError(errors.New("此接口仅支持标签包含 bugment 的渠道"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
+		newAPIError := middleware.SetupContextForSelectedChannel(c, channelFromDB, info.OriginModelName)
+		if newAPIError != nil {
+			return nil, newAPIError
 		}
 		return channelFromDB, nil
 	}

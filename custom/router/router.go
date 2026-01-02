@@ -24,7 +24,6 @@ func SetCustomRouter(router *gin.Engine) {
 	chatStreamRouter := router.Group("/chat-stream")
 	chatStreamRouter.Use(middleware.TokenAuth())
 	chatStreamRouter.Use(middleware.ModelRequestRateLimit())
-	chatStreamRouter.Use(middleware.Distribute())
 	{
 		chatStreamRouter.POST("", controller.RelayPassthrough)
 	}
