@@ -184,9 +184,23 @@ func (r *passthroughRequest) SetModelName(modelName string) {
 	// 不需要实现
 }
 
-// getPassthroughChannel 获取传透模式的渠道
+// isBugmentChannel 检查渠道标签是否包含 "bugment"（不区分大小写）
+func isBugmentChannel(channel *model.Channel) bool {
+	if channel == nil {
+		return false
+	}
+	tag := channel.GetTag()
+	return strings.Contains(strings.ToLower(tag), "bugment")
+}
+
+// getPassthroughChannel 获取传透模式的渠道（仅支持标签包含 bugment 的渠道）
 func getPassthroughChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
 	if info.ChannelMeta == nil {
+		// 直接指定渠道的情况，检查渠道标签是否包含 bugment
+		channelTag := c.GetString("channel_tag")
+		if !strings.Contains(strings.ToLower(channelTag), "bugment") {
+			return nil, types.NewError(errors.New("此接口仅支持标签包含 bugment 的渠道"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
 		autoBan := c.GetBool("auto_ban")
 		autoBanInt := 1
 		if !autoBan {
@@ -196,10 +210,12 @@ func getPassthroughChannel(c *gin.Context, info *relaycommon.RelayInfo, retryPar
 			Id:      c.GetInt("channel_id"),
 			Type:    c.GetInt("channel_type"),
 			Name:    c.GetString("channel_name"),
+			Tag:     &channelTag,
 			AutoBan: &autoBanInt,
 		}, nil
 	}
 
+	// 使用标准渠道选择函数获取渠道
 	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
 	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
 
@@ -208,6 +224,11 @@ func getPassthroughChannel(c *gin.Context, info *relaycommon.RelayInfo, retryPar
 	}
 	if channel == nil {
 		return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+	}
+
+	// 检查渠道标签是否包含 bugment
+	if !isBugmentChannel(channel) {
+		return nil, types.NewError(errors.New("此接口仅支持标签包含 bugment 的渠道"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
