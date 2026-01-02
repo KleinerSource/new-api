@@ -198,19 +198,19 @@ func isBugmentChannel(channel *model.Channel) bool {
 // ErrNoBugmentChannel 没有可用的 bugment 渠道错误
 var ErrNoBugmentChannel = errors.New("此接口仅支持标签包含 bugment 的渠道")
 
-// getRandomBugmentChannel 获取指定 group 和 model 下标签包含 bugment 的渠道
+// getRandomBugmentChannel 获取指定 group 下标签包含 bugment 的渠道
+// 注意：不检查 model，因为 bugment 渠道是透传渠道，支持所有模型
 // 支持重试机制，retry 参数用于在多个渠道间切换优先级
-func getRandomBugmentChannel(group string, modelName string, retry int) (*model.Channel, error) {
+func getRandomBugmentChannel(group string, retry int) (*model.Channel, error) {
 	// 构建兼容不同数据库的查询条件
 	groupCol := "`group`"
 	tagCol := "`tag`"
-	modelsCol := "`models`"
 	if common.UsingPostgreSQL {
 		groupCol = `"group"`
 		tagCol = `"tag"`
-		modelsCol = `"models"`
 	}
 
+	// group 字段格式是 "group1,group2"，需要用 CONCAT 添加前后逗号来精确匹配
 	var groupCondition string
 	if common.UsingMySQL {
 		groupCondition = fmt.Sprintf("CONCAT(',', %s, ',') LIKE ?", groupCol)
@@ -218,22 +218,13 @@ func getRandomBugmentChannel(group string, modelName string, retry int) (*model.
 		groupCondition = fmt.Sprintf("(',' || %s || ',') LIKE ?", groupCol)
 	}
 
-	// 构建模型查询条件
-	var modelCondition string
-	if common.UsingMySQL {
-		modelCondition = fmt.Sprintf("CONCAT(',', %s, ',') LIKE ?", modelsCol)
-	} else {
-		modelCondition = fmt.Sprintf("(',' || %s || ',') LIKE ?", modelsCol)
-	}
-
 	// 构建标签查询条件（不区分大小写）
 	tagCondition := fmt.Sprintf("LOWER(%s) LIKE ?", tagCol)
 
-	// 查询该 Group 和 Model 下所有标签包含 bugment 的渠道
+	// 查询该 Group 下所有标签包含 bugment 的渠道（不检查 model）
 	var channels []*model.Channel
 	err := model.DB.Where("status = ?", 1).
 		Where(groupCondition, "%,"+group+",%").
-		Where(modelCondition, "%,"+modelName+",%").
 		Where(tagCondition, "%bugment%").
 		Order("priority DESC").
 		Find(&channels).Error
@@ -342,15 +333,15 @@ func getPassthroughChannel(c *gin.Context, info *relaycommon.RelayInfo, retryPar
 		}, nil
 	}
 
-	// 使用专门的 Bugment 渠道选择函数（只从标签包含 bugment 的渠道中选择）
-	channel, err := getRandomBugmentChannel(retryParam.TokenGroup, retryParam.ModelName, retryParam.GetRetry())
+	// 使用专门的 Bugment 渠道选择函数（只从标签包含 bugment 的渠道中选择，不检查 model）
+	channel, err := getRandomBugmentChannel(retryParam.TokenGroup, retryParam.GetRetry())
 	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
 
 	if err != nil {
-		return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的标签包含 bugment 的渠道失败: %s", retryParam.TokenGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		return nil, types.NewError(fmt.Errorf("获取分组 %s 下标签包含 bugment 的渠道失败: %s", retryParam.TokenGroup, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 	if channel == nil {
-		return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的标签包含 bugment 的渠道不存在", retryParam.TokenGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		return nil, types.NewError(fmt.Errorf("分组 %s 下标签包含 bugment 的渠道不存在", retryParam.TokenGroup), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
