@@ -313,38 +313,23 @@ func selectChannelByPriorityAndWeight(channels []*model.Channel, retry int) (*mo
 
 // getPassthroughChannel 获取传透模式的渠道（仅支持标签包含 bugment 的渠道）
 func getPassthroughChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
-	if info.ChannelMeta == nil {
-		// 直接指定渠道的情况，检查渠道标签是否包含 bugment
-		channelTag := c.GetString("channel_tag")
+	if _, ok := c.Get("specific_channel_id"); ok {
+		// 直接指定渠道的情况，按数据库标签校验
 		channelId := c.GetInt("channel_id")
-		var channelFromDB *model.Channel
-		if channelTag == "" && channelId != 0 {
-			cachedChannel, err := model.CacheGetChannel(channelId)
-			if err != nil {
-				return nil, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
-			}
-			channelFromDB = cachedChannel
-			channelTag = cachedChannel.GetTag()
+		if channelId == 0 {
+			return nil, types.NewError(errors.New("channel id is required"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 		}
-		if channelFromDB != nil {
-			if !isBugmentChannel(channelFromDB) {
-				return nil, types.NewError(errors.New("此接口仅支持标签包含 bugment 的渠道"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
-			}
-		} else if !strings.Contains(strings.ToLower(channelTag), "bugment") {
+		channelFromDB, err := model.CacheGetChannel(channelId)
+		if err != nil {
+			return nil, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		}
+		if channelFromDB.Status != common.ChannelStatusEnabled {
+			return nil, types.NewError(errors.New("该渠道已被禁用"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
+		if !isBugmentChannel(channelFromDB) {
 			return nil, types.NewError(errors.New("此接口仅支持标签包含 bugment 的渠道"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 		}
-		autoBan := c.GetBool("auto_ban")
-		autoBanInt := 1
-		if !autoBan {
-			autoBanInt = 0
-		}
-		return &model.Channel{
-			Id:      c.GetInt("channel_id"),
-			Type:    c.GetInt("channel_type"),
-			Name:    c.GetString("channel_name"),
-			Tag:     &channelTag,
-			AutoBan: &autoBanInt,
-		}, nil
+		return channelFromDB, nil
 	}
 
 	// 使用专门的 Bugment 渠道选择函数（只从标签包含 bugment 的渠道中选择，不检查 model）
