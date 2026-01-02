@@ -140,8 +140,12 @@ func proxyGetModelsRequest(channel *model.Channel, originalToken string) (*http.
 		return nil, fmt.Errorf("渠道 Base URL 为空")
 	}
 
+	// 清理 baseURL：移除末尾的斜杠和 /chat-stream 路径
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	baseURL = strings.TrimSuffix(baseURL, "/chat-stream")
+
 	// 构建上游请求 URL
-	upstreamURL := fmt.Sprintf("%s/usage/api/get-models", strings.TrimSuffix(baseURL, "/"))
+	upstreamURL := fmt.Sprintf("%s/usage/api/get-models", baseURL)
 
 	// 创建请求
 	req, err := http.NewRequest(http.MethodGet, upstreamURL, nil)
