@@ -316,7 +316,21 @@ func getPassthroughChannel(c *gin.Context, info *relaycommon.RelayInfo, retryPar
 	if info.ChannelMeta == nil {
 		// 直接指定渠道的情况，检查渠道标签是否包含 bugment
 		channelTag := c.GetString("channel_tag")
-		if !strings.Contains(strings.ToLower(channelTag), "bugment") {
+		channelId := c.GetInt("channel_id")
+		var channelFromDB *model.Channel
+		if channelTag == "" && channelId != 0 {
+			cachedChannel, err := model.CacheGetChannel(channelId)
+			if err != nil {
+				return nil, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+			}
+			channelFromDB = cachedChannel
+			channelTag = cachedChannel.GetTag()
+		}
+		if channelFromDB != nil {
+			if !isBugmentChannel(channelFromDB) {
+				return nil, types.NewError(errors.New("此接口仅支持标签包含 bugment 的渠道"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+			}
+		} else if !strings.Contains(strings.ToLower(channelTag), "bugment") {
 			return nil, types.NewError(errors.New("此接口仅支持标签包含 bugment 的渠道"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 		}
 		autoBan := c.GetBool("auto_ban")
@@ -535,4 +549,3 @@ func postPassthroughConsumeQuotaWithResult(ctx *gin.Context, relayInfo *relaycom
 		Other:            other,
 	})
 }
-
