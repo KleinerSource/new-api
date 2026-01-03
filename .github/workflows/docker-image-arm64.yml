@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - '*'
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Trigger reason'
+        required: false
+        default: 'Manual trigger'
 
 jobs:
   build_single_arch:
@@ -30,13 +39,21 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Resolve tag & write VERSION
+      - name: Resolve version & write VERSION
         run: |
-          git fetch --tags --force --depth=1
-          TAG=${GITHUB_REF#refs/tags/}
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            # Tag 触发：使用 tag 作为版本号
+            TAG=${GITHUB_REF#refs/tags/}
+            echo "IS_TAG=true" >> $GITHUB_ENV
+          else
+            # Push 或手动触发：使用 dev-<short_sha> 作为版本号
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            TAG="dev-${SHORT_SHA}"
+            echo "IS_TAG=false" >> $GITHUB_ENV
+          fi
           echo "TAG=$TAG" >> $GITHUB_ENV
           echo "$TAG" > VERSION
-          echo "Building tag: $TAG for ${{ matrix.arch }}"
+          echo "Building version: $TAG for ${{ matrix.arch }}"
 
 
 #      - name: Normalize GHCR repository
@@ -63,8 +80,25 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            calciumion/new-api
+            KleinerSource/new-api
 #            ghcr.io/${{ env.GHCR_REPOSITORY }}
+
+      - name: Determine Docker tags
+        id: docker_tags
+        run: |
+          if [[ "${{ env.IS_TAG }}" == "true" ]]; then
+            # Tag 触发：推送版本标签和 latest 标签
+            echo "TAGS<<EOF" >> $GITHUB_OUTPUT
+            echo "KleinerSource/new-api:${{ env.TAG }}-${{ matrix.arch }}" >> $GITHUB_OUTPUT
+            echo "KleinerSource/new-api:latest-${{ matrix.arch }}" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            # Push 触发：只推送 dev 标签，不覆盖 latest
+            echo "TAGS<<EOF" >> $GITHUB_OUTPUT
+            echo "KleinerSource/new-api:${{ env.TAG }}-${{ matrix.arch }}" >> $GITHUB_OUTPUT
+            echo "KleinerSource/new-api:dev-${{ matrix.arch }}" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
 
       - name: Build & push single-arch (to both registries)
         uses: docker/build-push-action@v6
@@ -72,9 +106,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           push: true
-          tags: |
-            calciumion/new-api:${{ env.TAG }}-${{ matrix.arch }}
-            calciumion/new-api:latest-${{ matrix.arch }}
+          tags: ${{ steps.docker_tags.outputs.TAGS }}
 #            ghcr.io/${{ env.GHCR_REPOSITORY }}:${{ env.TAG }}-${{ matrix.arch }}
 #            ghcr.io/${{ env.GHCR_REPOSITORY }}:latest-${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -87,10 +119,19 @@ jobs:
     name: Create multi-arch manifests (Docker Hub)
     needs: [build_single_arch]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # 始终运行，但根据触发类型决定创建哪些 manifest
     steps:
-      - name: Extract tag
-        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+      - name: Resolve version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG=${GITHUB_REF#refs/tags/}
+            echo "IS_TAG=true" >> $GITHUB_ENV
+          else
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            TAG="dev-${SHORT_SHA}"
+            echo "IS_TAG=false" >> $GITHUB_ENV
+          fi
+          echo "TAG=$TAG" >> $GITHUB_ENV
 #
 #      - name: Normalize GHCR repository
 #        run: echo "GHCR_REPOSITORY=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
@@ -104,16 +145,27 @@ jobs:
       - name: Create & push manifest (Docker Hub - version)
         run: |
           docker buildx imagetools create \
-            -t calciumion/new-api:${TAG} \
-            calciumion/new-api:${TAG}-amd64 \
-            calciumion/new-api:${TAG}-arm64
+            -t KleinerSource/new-api:${TAG} \
+            KleinerSource/new-api:${TAG}-amd64 \
+            KleinerSource/new-api:${TAG}-arm64
 
       - name: Create & push manifest (Docker Hub - latest)
+        # 仅在 tag 触发时更新 latest
+        if: env.IS_TAG == 'true'
         run: |
           docker buildx imagetools create \
-            -t calciumion/new-api:latest \
-            calciumion/new-api:latest-amd64 \
-            calciumion/new-api:latest-arm64
+            -t KleinerSource/new-api:latest \
+            KleinerSource/new-api:latest-amd64 \
+            KleinerSource/new-api:latest-arm64
+
+      - name: Create & push manifest (Docker Hub - dev)
+        # 仅在 push 触发时更新 dev
+        if: env.IS_TAG == 'false'
+        run: |
+          docker buildx imagetools create \
+            -t KleinerSource/new-api:dev \
+            KleinerSource/new-api:dev-amd64 \
+            KleinerSource/new-api:dev-arm64
 
       # ---- GHCR ----
 #      - name: Log in to GHCR

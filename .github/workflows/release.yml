@@ -12,6 +12,9 @@ on:
     tags:
       - '*'
       - '!*-alpha*'
+    branches:
+      - main
+      - master
 
 jobs:
   linux:
@@ -24,7 +27,14 @@ jobs:
           fetch-depth: 0
       - name: Determine Version
         run: |
-          VERSION=$(git describe --tags)
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=$(git describe --tags)
+            echo "IS_TAG=true" >> $GITHUB_ENV
+          else
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            VERSION="dev-${SHORT_SHA}"
+            echo "IS_TAG=false" >> $GITHUB_ENV
+          fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
       - uses: oven-sh/setup-bun@v2
         with:
@@ -69,7 +79,14 @@ jobs:
           fetch-depth: 0
       - name: Determine Version
         run: |
-          VERSION=$(git describe --tags)
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=$(git describe --tags)
+            echo "IS_TAG=true" >> $GITHUB_ENV
+          else
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            VERSION="dev-${SHORT_SHA}"
+            echo "IS_TAG=false" >> $GITHUB_ENV
+          fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
       - uses: oven-sh/setup-bun@v2
         with:
@@ -112,7 +129,14 @@ jobs:
           fetch-depth: 0
       - name: Determine Version
         run: |
-          VERSION=$(git describe --tags)
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=$(git describe --tags)
+            echo "IS_TAG=true" >> $GITHUB_ENV
+          else
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            VERSION="dev-${SHORT_SHA}"
+            echo "IS_TAG=false" >> $GITHUB_ENV
+          fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
       - uses: oven-sh/setup-bun@v2
         with:
