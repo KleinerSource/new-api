@@ -5,8 +5,7 @@ on:
     tags:
       - '*'
     branches:
-      - main
-      - master
+      - modify
   workflow_dispatch:
     inputs:
       reason:
