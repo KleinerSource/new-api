@@ -59,6 +59,15 @@ jobs:
           sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y gcc-aarch64-linux-gnu
           CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -ldflags "-s -w -X 'new-api/common.Version=$VERSION' -extldflags '-static'" -o new-api-arm64-$VERSION
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: |
+            new-api-${{ env.VERSION }}
+            new-api-arm64-${{ env.VERSION }}
+          retention-days: 30
+
       - name: Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
@@ -107,6 +116,12 @@ jobs:
         run: |
           go mod download
           go build -ldflags "-X 'new-api/common.Version=$VERSION'" -o new-api-macos-$VERSION
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-binary
+          path: new-api-macos-${{ env.VERSION }}
+          retention-days: 30
       - name: Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
@@ -156,6 +171,12 @@ jobs:
         run: |
           go mod download
           go build -ldflags "-s -w -X 'new-api/common.Version=$VERSION'" -o new-api-$VERSION.exe
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binary
+          path: new-api-${{ env.VERSION }}.exe
+          retention-days: 30
       - name: Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
