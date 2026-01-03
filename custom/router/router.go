@@ -9,14 +9,13 @@ import (
 // SetCustomRouter 设置自定义扩展路由
 // 此文件用于二次开发功能，与上游代码分离，便于合并更新
 func SetCustomRouter(router *gin.Engine) {
-	// ==================== 余额查询接口 ====================
-	// /usage/api - Token 相关接口
-	usageBalanceRoute := router.Group("/usage/api")
-	usageBalanceRoute.Use(middleware.CriticalRateLimit())
-	usageBalanceRoute.Use(middleware.TokenAuth())
+	// ==================== Token 相关接口 ====================
+	// /usage/api - Token 范畴接口，不限流（已有 TokenAuth 认证）
+	usageApiRoute := router.Group("/usage/api")
+	usageApiRoute.Use(middleware.TokenAuth())
 	{
-		usageBalanceRoute.GET("/balance", controller.GetTokenBalance)
-		usageBalanceRoute.GET("/get-models", controller.GetModels)
+		usageApiRoute.GET("/balance", controller.GetTokenBalance)
+		usageApiRoute.GET("/get-models", controller.GetModels)
 	}
 
 	// ==================== 透传模式路由 ====================
