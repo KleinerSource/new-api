@@ -20,7 +20,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// PassthroughEndpoint 透传端点路径
+const PassthroughEndpoint = "/chat-stream"
+
 // PassthroughHelperWithUsage 传透模式处理器（带 usage 和内容提取）
+// 自定义 URL 构建逻辑：始终使用 base_url + /chat-stream，不依赖 Adaptor.GetRequestURL()
 func PassthroughHelperWithUsage(c *gin.Context, info *relaycommon.RelayInfo) (*PassthroughResult, *types.NewAPIError) {
 	info.InitChannelMeta(c)
 
@@ -39,16 +43,15 @@ func PassthroughHelperWithUsage(c *gin.Context, info *relaycommon.RelayInfo) (*P
 		logger.LogDebug(c, fmt.Sprintf("passthrough request body: %s", string(body)))
 	}
 
-	requestBody := bytes.NewBuffer(body)
-
-	resp, err := adaptor.DoRequest(c, info, requestBody)
+	// 使用自定义请求发送逻辑，绕过 Adaptor.GetRequestURL()
+	resp, err := doPassthroughRequestWithCustomURL(c, adaptor, info, body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
 
 	var httpResp *http.Response
 	if resp != nil {
-		httpResp = resp.(*http.Response)
+		httpResp = resp
 		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
 
 		if httpResp.StatusCode != http.StatusOK {
@@ -58,6 +61,47 @@ func PassthroughHelperWithUsage(c *gin.Context, info *relaycommon.RelayInfo) (*P
 	}
 
 	return passthroughResponseWithUsage(c, httpResp, info)
+}
+
+// doPassthroughRequestWithCustomURL 使用自定义 URL 构建逻辑发送透传请求
+// URL 构建规则：base_url + /chat-stream
+// 这样可以让渠道测试使用标准的 /v1/chat/completions，而透传请求使用 /chat-stream
+func doPassthroughRequestWithCustomURL(c *gin.Context, adaptor channel.Adaptor, info *relaycommon.RelayInfo, body []byte) (*http.Response, error) {
+	// 1. 构建 URL：base_url + /chat-stream
+	baseURL := strings.TrimSuffix(info.ChannelBaseUrl, "/")
+	fullRequestURL := baseURL + PassthroughEndpoint
+
+	if common.DebugEnabled {
+		logger.LogDebug(c, fmt.Sprintf("passthrough custom URL: %s (base: %s)", fullRequestURL, info.ChannelBaseUrl))
+	}
+
+	// 2. 创建 HTTP 请求
+	req, err := http.NewRequest(c.Request.Method, fullRequestURL, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request failed: %w", err)
+	}
+
+	// 3. 处理请求头覆盖（支持渠道配置的 headers_override）
+	headers := req.Header
+	if info.HeadersOverride != nil {
+		for k, v := range info.HeadersOverride {
+			if str, ok := v.(string); ok {
+				// 替换支持的变量
+				if strings.Contains(str, "{api_key}") {
+					str = strings.ReplaceAll(str, "{api_key}", info.ApiKey)
+				}
+				headers.Set(k, str)
+			}
+		}
+	}
+
+	// 4. 使用 Adaptor 设置请求头（保留认证逻辑）
+	if err := adaptor.SetupRequestHeader(c, &headers, info); err != nil {
+		return nil, fmt.Errorf("setup request header failed: %w", err)
+	}
+
+	// 5. 发送请求
+	return channel.DoRequest(c, req, info)
 }
 
 // passthroughResponseWithUsage 透传响应并提取 usage 和内容信息
