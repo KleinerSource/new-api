@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,8 +14,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// GetModels 获取模型列表（透传到上游 Bugment 渠道）
+// GetModels 获取模型列表（透传到上游 Bugment 渠道，并根据渠道和 Token 配置过滤）
 // GET /usage/api/get-models
+// 流程：上游响应 → 检查渠道开放模型 → 检查 Token 模型限制 → 返回过滤后的数据
 func GetModels(c *gin.Context) {
 	authHeader := c.GetHeader("Authorization")
 	if authHeader == "" {
@@ -72,16 +74,93 @@ func GetModels(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	// 复制上游响应头
-	for key, values := range resp.Header {
-		for _, value := range values {
-			c.Writer.Header().Add(key, value)
+	// 读取上游响应体
+	upstreamBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("读取上游响应失败: %s", err.Error()),
+		})
+		return
+	}
+
+	// 如果上游返回非 200，直接透传
+	if resp.StatusCode != http.StatusOK {
+		for key, values := range resp.Header {
+			for _, value := range values {
+				c.Writer.Header().Add(key, value)
+			}
+		}
+		c.Status(resp.StatusCode)
+		c.Writer.Write(upstreamBody)
+		return
+	}
+
+	// 解析上游模型列表
+	var upstreamModels map[string]interface{}
+	if err := json.Unmarshal(upstreamBody, &upstreamModels); err != nil {
+		// 解析失败，直接透传原始响应
+		c.Header("Content-Type", "application/json")
+		c.Status(resp.StatusCode)
+		c.Writer.Write(upstreamBody)
+		return
+	}
+
+	// 过滤模型列表
+	filteredModels := filterModels(upstreamModels, channel, token)
+
+	// 返回过滤后的模型列表
+	c.Header("Content-Type", "application/json")
+	c.JSON(http.StatusOK, filteredModels)
+}
+
+// filterModels 根据渠道配置和 Token 限制过滤模型列表
+// 过滤规则：
+// 1. 渠道模型列表（channel.Models）：渠道开放的模型
+// 2. Token 模型限制（token.ModelLimits）：用户 Token 允许使用的模型（仅当 ModelLimitsEnabled=true 时生效）
+// 返回：同时满足两个条件的模型
+func filterModels(upstreamModels map[string]interface{}, channel *model.Channel, token *model.Token) map[string]interface{} {
+	// 获取渠道开放的模型列表
+	channelModels := channel.GetModels()
+	channelModelSet := make(map[string]bool)
+	for _, m := range channelModels {
+		m = strings.TrimSpace(m)
+		if m != "" {
+			channelModelSet[m] = true
 		}
 	}
 
-	// 返回上游响应
-	c.Status(resp.StatusCode)
-	io.Copy(c.Writer, resp.Body)
+	// 获取 Token 模型限制列表
+	tokenModelSet := make(map[string]bool)
+	tokenLimitsEnabled := token.ModelLimitsEnabled && token.ModelLimits != ""
+	if tokenLimitsEnabled {
+		tokenModels := strings.Split(token.ModelLimits, ",")
+		for _, m := range tokenModels {
+			m = strings.TrimSpace(m)
+			if m != "" {
+				tokenModelSet[m] = true
+			}
+		}
+	}
+
+	// 过滤模型
+	filteredModels := make(map[string]interface{})
+	for modelName, modelInfo := range upstreamModels {
+		// 检查渠道是否开放该模型（如果渠道没有配置模型列表，则允许所有）
+		if len(channelModelSet) > 0 && !channelModelSet[modelName] {
+			continue
+		}
+
+		// 检查 Token 是否允许该模型（如果 Token 没有启用模型限制，则允许所有）
+		if tokenLimitsEnabled && !tokenModelSet[modelName] {
+			continue
+		}
+
+		// 通过所有检查，保留该模型
+		filteredModels[modelName] = modelInfo
+	}
+
+	return filteredModels
 }
 
 // getBugmentChannelByGroup 根据 Group 获取标签包含 bugment 的渠道
