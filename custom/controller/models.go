@@ -237,13 +237,12 @@ func getBugmentChannelsByGroup(group string) ([]*model.Channel, error) {
 		Order("priority DESC").
 		Find(&channels).Error
 
-	if common.DebugEnabled {
-		common.SysLog(fmt.Sprintf("[GetModels] 查询分组 %s 的渠道, SQL条件: %s, 参数: %s, 查询结果数量: %d",
-			group, groupCondition, groupPattern, len(channels)))
-		for i, ch := range channels {
-			common.SysLog(fmt.Sprintf("[GetModels] 渠道[%d]: id=%d, name=%s, group=%s, models=%s",
-				i, ch.Id, ch.Name, ch.Group, ch.Models))
-		}
+	// 始终输出日志以便排查问题
+	common.SysLog(fmt.Sprintf("[GetModels] 查询分组 %s 的渠道, SQL条件: %s, 参数: %s, 查询结果数量: %d",
+		group, groupCondition, groupPattern, len(channels)))
+	for i, ch := range channels {
+		common.SysLog(fmt.Sprintf("[GetModels] 渠道[%d]: id=%d, name=%s, group=%s, tag=%v, models=%s",
+			i, ch.Id, ch.Name, ch.Group, ch.Tag, ch.Models))
 	}
 
 	if err != nil {
