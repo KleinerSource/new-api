@@ -101,12 +101,13 @@ func GetTokenBalance(c *gin.Context) {
 
 // getUpstreamLoginToken 从上游 Bugment 渠道获取 login_token
 func getUpstreamLoginToken(c *gin.Context, tokenGroup string, tokenKey string) interface{} {
-	// 获取 Bugment 渠道
-	channel, err := getBugmentChannelByGroup(tokenGroup)
+	// 获取 Bugment 渠道（取优先级最高的）
+	channels, err := getBugmentChannelsByGroup(tokenGroup)
 	if err != nil {
 		logger.LogWarn(c, fmt.Sprintf("获取 Bugment 渠道失败: %s", err.Error()))
 		return nil
 	}
+	channel := channels[0]
 
 	// 验证渠道标签是否包含 bugment
 	if !isBugmentChannel(channel) {

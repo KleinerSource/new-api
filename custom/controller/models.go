@@ -53,8 +53,8 @@ func GetModels(c *gin.Context) {
 		tokenGroup = "default"
 	}
 
-	// 查找该 Group 下的 Bugment 渠道
-	channel, err := getBugmentChannelByGroup(tokenGroup)
+	// 查找该 Group 下的所有 Bugment 渠道
+	channels, err := getBugmentChannelsByGroup(tokenGroup)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -63,8 +63,12 @@ func GetModels(c *gin.Context) {
 		return
 	}
 
-	// 透传请求到上游
-	resp, err := proxyGetModelsRequest(channel, tokenKey)
+	// 聚合所有渠道的模型列表（取并集）
+	aggregatedModels := aggregateChannelModels(channels)
+
+	// 使用优先级最高的渠道透传请求到上游
+	primaryChannel := channels[0]
+	resp, err := proxyGetModelsRequest(primaryChannel, tokenKey)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -106,30 +110,34 @@ func GetModels(c *gin.Context) {
 		return
 	}
 
-	// 过滤模型列表
-	filteredModels := filterModels(upstreamModels, channel, token)
+	// 过滤模型列表（使用聚合后的渠道模型）
+	filteredModels := filterModelsWithAggregated(upstreamModels, aggregatedModels, token)
 
 	// 返回过滤后的模型列表
 	c.Header("Content-Type", "application/json")
 	c.JSON(http.StatusOK, filteredModels)
 }
 
-// filterModels 根据渠道配置和 Token 限制过滤模型列表
-// 过滤规则：
-// 1. 渠道模型列表（channel.Models）：渠道开放的模型
-// 2. Token 模型限制（token.ModelLimits）：用户 Token 允许使用的模型（仅当 ModelLimitsEnabled=true 时生效）
-// 返回：同时满足两个条件的模型
-func filterModels(upstreamModels map[string]interface{}, channel *model.Channel, token *model.Token) map[string]interface{} {
-	// 获取渠道开放的模型列表
-	channelModels := channel.GetModels()
-	channelModelSet := make(map[string]bool)
-	for _, m := range channelModels {
-		m = strings.TrimSpace(m)
-		if m != "" {
-			channelModelSet[m] = true
+// aggregateChannelModels 聚合多个渠道的模型列表（取并集）
+func aggregateChannelModels(channels []*model.Channel) map[string]bool {
+	modelSet := make(map[string]bool)
+	for _, ch := range channels {
+		for _, m := range ch.GetModels() {
+			m = strings.TrimSpace(m)
+			if m != "" {
+				modelSet[m] = true
+			}
 		}
 	}
+	return modelSet
+}
 
+// filterModelsWithAggregated 根据聚合的渠道模型和 Token 限制过滤模型列表
+// 过滤规则：
+// 1. 聚合渠道模型（所有渠道模型的并集）：用户分组下所有渠道开放的模型
+// 2. Token 模型限制（token.ModelLimits）：用户 Token 允许使用的模型（仅当 ModelLimitsEnabled=true 时生效）
+// 返回：同时满足两个条件的模型
+func filterModelsWithAggregated(upstreamModels map[string]interface{}, channelModelSet map[string]bool, token *model.Token) map[string]interface{} {
 	// 获取 Token 模型限制列表
 	tokenModelSet := make(map[string]bool)
 	tokenLimitsEnabled := token.ModelLimitsEnabled && token.ModelLimits != ""
@@ -163,8 +171,8 @@ func filterModels(upstreamModels map[string]interface{}, channel *model.Channel,
 	return filteredModels
 }
 
-// getBugmentChannelByGroup 根据 Group 获取标签包含 bugment 的渠道
-func getBugmentChannelByGroup(group string) (*model.Channel, error) {
+// getBugmentChannelsByGroup 根据 Group 获取所有标签包含 bugment 的渠道
+func getBugmentChannelsByGroup(group string) ([]*model.Channel, error) {
 	// 构建兼容不同数据库的 group 查询条件
 	var groupCondition string
 	groupCol := "`group`"
@@ -209,7 +217,7 @@ func getBugmentChannelByGroup(group string) (*model.Channel, error) {
 		return nil, fmt.Errorf("分组 %s 下没有标签包含 bugment 的可用渠道", group)
 	}
 
-	return matchedChannels[0], nil
+	return matchedChannels, nil
 }
 
 // proxyGetModelsRequest 透传获取模型列表请求到上游
