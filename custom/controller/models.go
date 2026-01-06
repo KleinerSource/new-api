@@ -66,6 +66,19 @@ func GetModels(c *gin.Context) {
 	// 聚合所有渠道的模型列表（取并集）
 	aggregatedModels := aggregateChannelModels(channels)
 
+	if common.DebugEnabled {
+		var channelNames []string
+		for _, ch := range channels {
+			channelNames = append(channelNames, fmt.Sprintf("%s(group=%s,models=%s)", ch.Name, ch.Group, ch.Models))
+		}
+		var modelNames []string
+		for m := range aggregatedModels {
+			modelNames = append(modelNames, m)
+		}
+		common.SysLog(fmt.Sprintf("[GetModels] 用户分组: %s, 匹配渠道: %v, 聚合模型: %v",
+			tokenGroup, channelNames, modelNames))
+	}
+
 	// 使用优先级最高的渠道透传请求到上游
 	primaryChannel := channels[0]
 	resp, err := proxyGetModelsRequest(primaryChannel, tokenKey)
@@ -104,14 +117,36 @@ func GetModels(c *gin.Context) {
 	var upstreamModels map[string]interface{}
 	if err := json.Unmarshal(upstreamBody, &upstreamModels); err != nil {
 		// 解析失败，直接透传原始响应
+		common.SysLog(fmt.Sprintf("[GetModels] 解析上游响应失败: %s, 原始响应: %s", err.Error(), string(upstreamBody[:min(len(upstreamBody), 500)])))
 		c.Header("Content-Type", "application/json")
 		c.Status(resp.StatusCode)
 		c.Writer.Write(upstreamBody)
 		return
 	}
 
+	// 添加调试日志：上游返回的模型列表
+	var upstreamModelNames []string
+	for modelName := range upstreamModels {
+		upstreamModelNames = append(upstreamModelNames, modelName)
+	}
+	common.SysLog(fmt.Sprintf("[GetModels] 上游返回模型数量: %d, 模型列表: %v", len(upstreamModels), upstreamModelNames))
+
+	// 添加调试日志：渠道模型集合
+	var channelModelNames []string
+	for modelName := range aggregatedModels {
+		channelModelNames = append(channelModelNames, modelName)
+	}
+	common.SysLog(fmt.Sprintf("[GetModels] 渠道允许模型数量: %d, 模型列表: %v", len(aggregatedModels), channelModelNames))
+
 	// 过滤模型列表（使用聚合后的渠道模型）
 	filteredModels := filterModelsWithAggregated(upstreamModels, aggregatedModels, token)
+
+	// 添加调试日志：过滤后的模型列表
+	var filteredModelNames []string
+	for modelName := range filteredModels {
+		filteredModelNames = append(filteredModelNames, modelName)
+	}
+	common.SysLog(fmt.Sprintf("[GetModels] 过滤后模型数量: %d, 模型列表: %v", len(filteredModels), filteredModelNames))
 
 	// 返回过滤后的模型列表
 	c.Header("Content-Type", "application/json")
@@ -195,11 +230,21 @@ func getBugmentChannelsByGroup(group string) ([]*model.Channel, error) {
 
 	// 查询该 Group 下所有标签包含 bugment 的渠道
 	var channels []*model.Channel
+	groupPattern := "%," + group + ",%"
 	err := model.DB.Where("status = ?", 1).
-		Where(groupCondition, "%,"+group+",%").
+		Where(groupCondition, groupPattern).
 		Where(tagCondition, "%bugment%").
 		Order("priority DESC").
 		Find(&channels).Error
+
+	if common.DebugEnabled {
+		common.SysLog(fmt.Sprintf("[GetModels] 查询分组 %s 的渠道, SQL条件: %s, 参数: %s, 查询结果数量: %d",
+			group, groupCondition, groupPattern, len(channels)))
+		for i, ch := range channels {
+			common.SysLog(fmt.Sprintf("[GetModels] 渠道[%d]: id=%d, name=%s, group=%s, models=%s",
+				i, ch.Id, ch.Name, ch.Group, ch.Models))
+		}
+	}
 
 	if err != nil {
 		return nil, fmt.Errorf("查询渠道失败: %w", err)
