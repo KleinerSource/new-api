@@ -79,57 +79,66 @@ func GetModels(c *gin.Context) {
 			tokenGroup, channelNames, modelNames))
 	}
 
-	// 使用优先级最高的渠道透传请求到上游
-	primaryChannel := channels[0]
-	resp, err := proxyGetModelsRequest(primaryChannel, tokenKey)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("透传请求失败: %s", err.Error()),
-		})
-		return
-	}
-	defer resp.Body.Close()
-
-	// 读取上游响应体
-	upstreamBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("读取上游响应失败: %s", err.Error()),
-		})
-		return
-	}
-
-	// 如果上游返回非 200，直接透传
-	if resp.StatusCode != http.StatusOK {
-		for key, values := range resp.Header {
-			for _, value := range values {
-				c.Writer.Header().Add(key, value)
-			}
+	// 依次请求各渠道上游模型列表，按优先级合并（同名模型保留第一个渠道的结果）
+	mergedUpstreamModels := make(map[string]interface{})
+	successCount := 0
+	var lastErr error
+	for _, ch := range channels {
+		resp, err := proxyGetModelsRequest(ch, tokenKey)
+		if err != nil {
+			lastErr = err
+			common.SysLog(fmt.Sprintf("[GetModels] 渠道[%d]透传请求失败: %s", ch.Id, err.Error()))
+			continue
 		}
-		c.Status(resp.StatusCode)
-		c.Writer.Write(upstreamBody)
-		return
+
+		upstreamBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			common.SysLog(fmt.Sprintf("[GetModels] 渠道[%d]读取上游响应失败: %s", ch.Id, err.Error()))
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("status=%d", resp.StatusCode)
+			common.SysLog(fmt.Sprintf("[GetModels] 渠道[%d]上游返回非200: %d, 响应: %s", ch.Id, resp.StatusCode, string(upstreamBody[:min(len(upstreamBody), 500)])))
+			continue
+		}
+
+		var upstreamModels map[string]interface{}
+		if err := json.Unmarshal(upstreamBody, &upstreamModels); err != nil {
+			lastErr = err
+			common.SysLog(fmt.Sprintf("[GetModels] 渠道[%d]解析上游响应失败: %s, 原始响应: %s", ch.Id, err.Error(), string(upstreamBody[:min(len(upstreamBody), 500)])))
+			continue
+		}
+
+		for modelName, modelInfo := range upstreamModels {
+			if _, exists := mergedUpstreamModels[modelName]; exists {
+				continue
+			}
+			mergedUpstreamModels[modelName] = modelInfo
+		}
+		successCount++
 	}
 
-	// 解析上游模型列表
-	var upstreamModels map[string]interface{}
-	if err := json.Unmarshal(upstreamBody, &upstreamModels); err != nil {
-		// 解析失败，直接透传原始响应
-		common.SysLog(fmt.Sprintf("[GetModels] 解析上游响应失败: %s, 原始响应: %s", err.Error(), string(upstreamBody[:min(len(upstreamBody), 500)])))
-		c.Header("Content-Type", "application/json")
-		c.Status(resp.StatusCode)
-		c.Writer.Write(upstreamBody)
+	if successCount == 0 {
+		errMsg := "所有渠道上游请求失败"
+		if lastErr != nil {
+			errMsg = fmt.Sprintf("%s: %s", errMsg, lastErr.Error())
+		}
+		c.JSON(http.StatusBadGateway, gin.H{
+			"success": false,
+			"message": errMsg,
+		})
 		return
 	}
 
 	// 添加调试日志：上游返回的模型列表
 	var upstreamModelNames []string
-	for modelName := range upstreamModels {
+	for modelName := range mergedUpstreamModels {
 		upstreamModelNames = append(upstreamModelNames, modelName)
 	}
-	common.SysLog(fmt.Sprintf("[GetModels] 上游返回模型数量: %d, 模型列表: %v", len(upstreamModels), upstreamModelNames))
+	common.SysLog(fmt.Sprintf("[GetModels] 上游返回模型数量: %d, 模型列表: %v", len(mergedUpstreamModels), upstreamModelNames))
 
 	// 添加调试日志：渠道模型集合
 	var channelModelNames []string
@@ -139,7 +148,7 @@ func GetModels(c *gin.Context) {
 	common.SysLog(fmt.Sprintf("[GetModels] 渠道允许模型数量: %d, 模型列表: %v", len(aggregatedModels), channelModelNames))
 
 	// 过滤模型列表（使用聚合后的渠道模型）
-	filteredModels := filterModelsWithAggregated(upstreamModels, aggregatedModels, token)
+	filteredModels := filterModelsWithAggregated(mergedUpstreamModels, aggregatedModels, token)
 
 	// 添加调试日志：过滤后的模型列表
 	var filteredModelNames []string
@@ -295,4 +304,3 @@ func proxyGetModelsRequest(channel *model.Channel, originalToken string) (*http.
 
 	return client.Do(req)
 }
-
