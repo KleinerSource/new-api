@@ -11,6 +11,7 @@ import (
 func SetApiRouter(router *gin.Engine) {
 	apiRouter := router.Group("/api")
 	apiRouter.Use(gzip.Gzip(gzip.DefaultCompression))
+	apiRouter.Use(middleware.BodyStorageCleanup()) // 清理请求体存储
 	apiRouter.Use(middleware.GlobalAPIRateLimit())
 	{
 		apiRouter.GET("/setup", controller.GetSetup)
@@ -123,8 +124,18 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			optionRoute.GET("/", controller.GetOptions)
 			optionRoute.PUT("/", controller.UpdateOption)
+			optionRoute.GET("/channel_affinity_cache", controller.GetChannelAffinityCacheStats)
+			optionRoute.DELETE("/channel_affinity_cache", controller.ClearChannelAffinityCache)
 			optionRoute.POST("/rest_model_ratio", controller.ResetModelRatio)
 			optionRoute.POST("/migrate_console_setting", controller.MigrateConsoleSetting) // 用于迁移检测的旧键，下个版本会删除
+		}
+		performanceRoute := apiRouter.Group("/performance")
+		performanceRoute.Use(middleware.RootAuth())
+		{
+			performanceRoute.GET("/stats", controller.GetPerformanceStats)
+			performanceRoute.DELETE("/disk_cache", controller.ClearDiskCache)
+			performanceRoute.POST("/reset_stats", controller.ResetPerformanceStats)
+			performanceRoute.POST("/gc", controller.ForceGC)
 		}
 		ratioSyncRoute := apiRouter.Group("/ratio_sync")
 		ratioSyncRoute.Use(middleware.RootAuth())
@@ -156,6 +167,12 @@ func SetApiRouter(router *gin.Engine) {
 			channelRoute.POST("/fix", controller.FixChannelsAbilities)
 			channelRoute.GET("/fetch_models/:id", controller.FetchUpstreamModels)
 			channelRoute.POST("/fetch_models", controller.FetchModels)
+			channelRoute.POST("/codex/oauth/start", controller.StartCodexOAuth)
+			channelRoute.POST("/codex/oauth/complete", controller.CompleteCodexOAuth)
+			channelRoute.POST("/:id/codex/oauth/start", controller.StartCodexOAuthForChannel)
+			channelRoute.POST("/:id/codex/oauth/complete", controller.CompleteCodexOAuthForChannel)
+			channelRoute.POST("/:id/codex/refresh", controller.RefreshCodexChannelCredential)
+			channelRoute.GET("/:id/codex/usage", controller.GetCodexChannelUsage)
 			channelRoute.POST("/ollama/pull", controller.OllamaPullModel)
 			channelRoute.POST("/ollama/pull/stream", controller.OllamaPullModelStream)
 			channelRoute.DELETE("/ollama/delete", controller.OllamaDeleteModel)
