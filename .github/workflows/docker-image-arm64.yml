@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - '*'
+<<<<<<< HEAD
     branches:
       - modify
   workflow_dispatch:
@@ -12,6 +13,14 @@ on:
         description: 'Trigger reason'
         required: false
         default: 'Manual trigger'
+=======
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name to build (e.g., v0.10.8-alpha.3)'
+        required: true
+        type: string
+>>>>>>> 0d0f7473d485feb0d64879dac44547f5a77d5186
 
 jobs:
   build_single_arch:
@@ -33,13 +42,15 @@ jobs:
       contents: read
 
     steps:
-      - name: Check out (shallow)
+      - name: Check out
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 0 || 1 }}
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Resolve version & write VERSION
         run: |
+<<<<<<< HEAD
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             # Tag 触发：使用 tag 作为版本号
             TAG=${GITHUB_REF#refs/tags/}
@@ -49,6 +60,17 @@ jobs:
             SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
             TAG="dev-${SHORT_SHA}"
             echo "IS_TAG=false" >> $GITHUB_ENV
+=======
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+            # Verify tag exists
+            if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+              echo "Error: Tag '$TAG' does not exist in the repository"
+              exit 1
+            fi
+          else
+            TAG=${GITHUB_REF#refs/tags/}
+>>>>>>> 0d0f7473d485feb0d64879dac44547f5a77d5186
           fi
           echo "TAG=$TAG" >> $GITHUB_ENV
           echo "$TAG" > VERSION
@@ -118,6 +140,7 @@ jobs:
     name: Create multi-arch manifests (Docker Hub)
     needs: [build_single_arch]
     runs-on: ubuntu-latest
+<<<<<<< HEAD
     # 始终运行，但根据触发类型决定创建哪些 manifest
     steps:
       - name: Resolve version
@@ -131,6 +154,17 @@ jobs:
             echo "IS_TAG=false" >> $GITHUB_ENV
           fi
           echo "TAG=$TAG" >> $GITHUB_ENV
+=======
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Extract tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "TAG=${{ github.event.inputs.tag }}" >> $GITHUB_ENV
+          else
+            echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          fi
+>>>>>>> 0d0f7473d485feb0d64879dac44547f5a77d5186
 #
 #      - name: Normalize GHCR repository
 #        run: echo "GHCR_REPOSITORY=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV

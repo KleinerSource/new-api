@@ -90,10 +90,10 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 
 		// 等待所有 goroutine 退出，最多等待5秒
 		done := make(chan struct{})
-		go func() {
+		gopool.Go(func() {
 			wg.Wait()
 			close(done)
-		}()
+		})
 
 		select {
 		case <-done:
@@ -138,11 +138,11 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				case <-pingTicker.C:
 					// 使用超时机制防止写操作阻塞
 					done := make(chan error, 1)
-					go func() {
+					gopool.Go(func() {
 						writeMutex.Lock()
 						defer writeMutex.Unlock()
 						done <- PingData(c)
-					}()
+					})
 
 					select {
 					case err := <-done:
@@ -215,18 +215,20 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				continue
 			}
 			data = data[5:]
-			data = strings.TrimLeft(data, " ")
-			data = strings.TrimSuffix(data, "\r")
+			data = strings.TrimSpace(data)
+			if data == "" {
+				continue
+			}
 			if !strings.HasPrefix(data, "[DONE]") {
 				info.SetFirstResponseTime()
-
+				info.ReceivedResponseCount++
 				// 使用超时机制防止写操作阻塞
 				done := make(chan bool, 1)
-				go func() {
+				gopool.Go(func() {
 					writeMutex.Lock()
 					defer writeMutex.Unlock()
 					done <- dataHandler(data)
-				}()
+				})
 
 				select {
 				case success := <-done:
