@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -73,7 +72,7 @@ func RelayPassthrough(c *gin.Context) {
 	}
 
 	relayInfo := genPassthroughRelayInfo(c, chatStreamReq.Model, true)
-	estimatedInputTokens := calculateInputTokens(chatStreamReq, relayInfo.OriginModelName)
+	estimatedInputTokens := calculateInputTokens(c, chatStreamReq, relayInfo.OriginModelName)
 	relayInfo.SetEstimatePromptTokens(estimatedInputTokens)
 
 	priceData, err := helper.ModelPriceHelper(c, relayInfo, estimatedInputTokens, &types.TokenCountMeta{})
@@ -82,16 +81,22 @@ func RelayPassthrough(c *gin.Context) {
 		return
 	}
 
-	if !priceData.FreeModel {
-		newAPIError = service.PreConsumeQuota(c, priceData.QuotaToPreConsume, relayInfo)
+	if priceData.FreeModel {
+		logger.LogInfo(c, fmt.Sprintf("模型 %s 免费，跳过预扣费", relayInfo.OriginModelName))
+	} else {
+		newAPIError = service.PreConsumeBilling(c, priceData.QuotaToPreConsume, relayInfo)
 		if newAPIError != nil {
 			return
 		}
 	}
 
 	defer func() {
-		if newAPIError != nil && relayInfo.FinalPreConsumedQuota != 0 {
-			service.ReturnPreConsumedQuota(c, relayInfo)
+		if newAPIError != nil {
+			newAPIError = service.NormalizeViolationFeeError(newAPIError)
+			if relayInfo.Billing != nil {
+				relayInfo.Billing.Refund(c)
+			}
+			service.ChargeViolationFeeIfNeeded(c, relayInfo, newAPIError)
 		}
 	}()
 
@@ -118,7 +123,7 @@ func RelayPassthrough(c *gin.Context) {
 			break
 		}
 
-		requestBody, bodyErr := common.GetRequestBody(c)
+		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
 			if common.IsRequestBodyTooLargeError(bodyErr) || errors.Is(bodyErr, common.ErrRequestBodyTooLarge) {
 				newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, http.StatusRequestEntityTooLarge, types.ErrOptionWithSkipRetry())
@@ -127,7 +132,7 @@ func RelayPassthrough(c *gin.Context) {
 			}
 			break
 		}
-		c.Request.Body = io.NopCloser(bytes.NewBuffer(requestBody))
+		c.Request.Body = io.NopCloser(bodyStorage)
 
 		var passthroughResult *relay.PassthroughResult
 		passthroughResult, newAPIError = relay.PassthroughHelperWithUsage(c, relayInfo)
@@ -378,7 +383,7 @@ func applyModelMapping(c *gin.Context, info *relaycommon.RelayInfo) error {
 }
 
 // calculateInputTokens 精确计算输入 token 数量
-func calculateInputTokens(req ChatStreamRequest, modelName string) int {
+func calculateInputTokens(c *gin.Context, req ChatStreamRequest, modelName string) int {
 	totalTokens := 0
 
 	if req.Data != "" {
@@ -389,11 +394,14 @@ func calculateInputTokens(req ChatStreamRequest, modelName string) int {
 		if imageData == "" {
 			continue
 		}
-		fileMeta := &types.FileMeta{
-			FileType:   types.FileTypeImage,
-			OriginData: imageData,
+		var source *types.FileSource
+		if strings.HasPrefix(imageData, "http") {
+			source = types.NewURLFileSource(imageData)
+		} else {
+			source = types.NewBase64FileSource(imageData, "")
 		}
-		imageTokens, err := service.GetImageTokenForPassthrough(fileMeta, modelName)
+		fileMeta := types.NewImageFileMeta(source, "")
+		imageTokens, err := service.GetImageTokenForPassthrough(c, fileMeta, modelName)
 		if err != nil {
 			common.SysLog(fmt.Sprintf("calculate image token failed: %v, using default 500", err))
 			imageTokens = 500
@@ -507,27 +515,8 @@ func postPassthroughConsumeQuotaWithResult(ctx *gin.Context, relayInfo *relaycom
 		logContent += fmt.Sprintf("，模型价格 %.2f，分组倍率 %.2f", modelPrice, groupRatio)
 	}
 
-	quotaDelta := quota - relayInfo.FinalPreConsumedQuota
-
-	if quotaDelta > 0 {
-		logger.LogInfo(ctx, fmt.Sprintf("传透模式预扣费后补扣费：%s（实际消耗：%s，预扣费：%s）",
-			logger.FormatQuota(quotaDelta),
-			logger.FormatQuota(quota),
-			logger.FormatQuota(relayInfo.FinalPreConsumedQuota),
-		))
-	} else if quotaDelta < 0 {
-		logger.LogInfo(ctx, fmt.Sprintf("传透模式预扣费后返还扣费：%s（实际消耗：%s，预扣费：%s）",
-			logger.FormatQuota(-quotaDelta),
-			logger.FormatQuota(quota),
-			logger.FormatQuota(relayInfo.FinalPreConsumedQuota),
-		))
-	}
-
-	if quotaDelta != 0 {
-		err := service.PostConsumeQuota(relayInfo, quotaDelta, relayInfo.FinalPreConsumedQuota, true)
-		if err != nil {
-			logger.LogError(ctx, "error consuming token remain quota: "+err.Error())
-		}
+	if err := service.SettleBilling(ctx, relayInfo, quota); err != nil {
+		logger.LogError(ctx, "error settling billing: "+err.Error())
 	}
 
 	if quota > 0 {

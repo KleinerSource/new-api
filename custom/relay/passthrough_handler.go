@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,17 +35,26 @@ func PassthroughHelperWithUsage(c *gin.Context, info *relaycommon.RelayInfo) (*P
 	}
 	adaptor.Init(info)
 
-	body, err := common.GetRequestBody(c)
+	bodyStorage, err := common.GetBodyStorage(c)
 	if err != nil {
+		if common.IsRequestBodyTooLargeError(err) || errors.Is(err, common.ErrRequestBodyTooLarge) {
+			return nil, types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusRequestEntityTooLarge, types.ErrOptionWithSkipRetry())
+		}
 		return nil, types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
 
 	if common.DebugEnabled {
-		logger.LogDebug(c, fmt.Sprintf("passthrough request body: %s", string(body)))
+		if debugBytes, bErr := bodyStorage.Bytes(); bErr == nil {
+			logger.LogDebug(c, fmt.Sprintf("passthrough request body: %s", string(debugBytes)))
+		}
+	}
+
+	if _, seekErr := bodyStorage.Seek(0, io.SeekStart); seekErr != nil {
+		return nil, types.NewErrorWithStatusCode(seekErr, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
 
 	// 使用自定义请求发送逻辑，绕过 Adaptor.GetRequestURL()
-	resp, err := doPassthroughRequestWithCustomURL(c, adaptor, info, body)
+	resp, err := doPassthroughRequestWithCustomURL(c, adaptor, info, bodyStorage)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
@@ -66,7 +76,7 @@ func PassthroughHelperWithUsage(c *gin.Context, info *relaycommon.RelayInfo) (*P
 // doPassthroughRequestWithCustomURL 使用自定义 URL 构建逻辑发送透传请求
 // URL 构建规则：base_url + /chat-stream
 // 这样可以让渠道测试使用标准的 /v1/chat/completions，而透传请求使用 /chat-stream
-func doPassthroughRequestWithCustomURL(c *gin.Context, adaptor channel.Adaptor, info *relaycommon.RelayInfo, body []byte) (*http.Response, error) {
+func doPassthroughRequestWithCustomURL(c *gin.Context, adaptor channel.Adaptor, info *relaycommon.RelayInfo, body io.Reader) (*http.Response, error) {
 	// 1. 构建 URL：base_url + /chat-stream
 	baseURL := strings.TrimSuffix(info.ChannelBaseUrl, "/")
 	fullRequestURL := baseURL + PassthroughEndpoint
@@ -76,7 +86,7 @@ func doPassthroughRequestWithCustomURL(c *gin.Context, adaptor channel.Adaptor, 
 	}
 
 	// 2. 创建 HTTP 请求
-	req, err := http.NewRequest(c.Request.Method, fullRequestURL, bytes.NewBuffer(body))
+	req, err := http.NewRequest(c.Request.Method, fullRequestURL, common.ReaderOnly(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request failed: %w", err)
 	}
