@@ -576,6 +576,15 @@ func postPassthroughConsumeQuotaWithResult(ctx *gin.Context, relayInfo *relaycom
 		logContent += fmt.Sprintf("，模型价格 %.2f，分组倍率 %.2f", modelPrice, groupRatio)
 	}
 
+	totalTokens := promptTokens + completionTokens
+	quota, minChargeResult := service.ApplyMinimumCharge(relayInfo, quota, totalTokens)
+	if minChargeResult.Applied {
+		logContent += fmt.Sprintf("，触发保底消费 $%g（原计费 %s → 保底 %s）",
+			minChargeResult.MinCharge,
+			logger.FormatQuota(minChargeResult.OriginalQuota),
+			logger.FormatQuota(minChargeResult.MinQuota))
+	}
+
 	if err := service.SettleBilling(ctx, relayInfo, quota); err != nil {
 		logger.LogError(ctx, "error settling billing: "+err.Error())
 	}
@@ -589,6 +598,12 @@ func postPassthroughConsumeQuotaWithResult(ctx *gin.Context, relayInfo *relaycom
 	other["passthrough"] = true
 	if result != nil && result.Usage != nil {
 		other["usage"] = result.Usage
+	}
+	if minChargeResult.Applied {
+		other["min_charge_applied"] = true
+		other["min_charge_price"] = minChargeResult.MinCharge
+		other["min_charge_quota"] = minChargeResult.MinQuota
+		other["min_charge_original_quota"] = minChargeResult.OriginalQuota
 	}
 
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
