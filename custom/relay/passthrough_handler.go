@@ -24,6 +24,7 @@ import (
 
 // PassthroughEndpoint 透传端点路径
 const PassthroughEndpoint = "/chat-stream"
+const augmentStatusHeader = "X-Augment-Status"
 
 // PassthroughHelperWithUsage 传透模式处理器（带 usage 和内容提取）
 // 自定义 URL 构建逻辑：始终使用 base_url + /chat-stream，不依赖 Adaptor.GetRequestURL()
@@ -129,15 +130,22 @@ func passthroughResponseWithUsage(c *gin.Context, resp *http.Response, info *rel
 		}
 	}
 
-	if info.IsStream {
-		return passthroughStreamResponseWithUsage(c, resp, info)
-	}
+	augmentStatus := resp.Header.Get(augmentStatusHeader)
+	checkStopReason := !isAugmentStatusFailure(augmentStatus)
 
-	return passthroughNonStreamResponseWithUsage(c, resp, info)
+	var result *PassthroughResult
+	var apiErr *types.NewAPIError
+	if info.IsStream {
+		result, apiErr = passthroughStreamResponseWithUsage(c, resp, info, checkStopReason)
+	} else {
+		result, apiErr = passthroughNonStreamResponseWithUsage(c, resp, info, checkStopReason)
+	}
+	markAugmentStatusError(result, augmentStatus)
+	return result, apiErr
 }
 
 // passthroughStreamResponseWithUsage 流式响应透传（带 usage 和内容提取）
-func passthroughStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*PassthroughResult, *types.NewAPIError) {
+func passthroughStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, checkStopReason bool) (*PassthroughResult, *types.NewAPIError) {
 	helper.SetEventStreamHeaders(c)
 
 	flusher, ok := c.Writer.(http.Flusher)
@@ -148,7 +156,7 @@ func passthroughStreamResponseWithUsage(c *gin.Context, resp *http.Response, inf
 			return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 		}
 		c.Writer.Write(responseBody)
-		return GetPassthroughResult(responseBody, true), nil
+		return getPassthroughResult(responseBody, true, checkStopReason), nil
 	}
 
 	var allData bytes.Buffer
@@ -172,12 +180,12 @@ func passthroughStreamResponseWithUsage(c *gin.Context, resp *http.Response, inf
 		}
 	}
 
-	result := GetPassthroughResult(allData.Bytes(), true)
+	result := getPassthroughResult(allData.Bytes(), true, checkStopReason)
 	return result, nil
 }
 
 // passthroughNonStreamResponseWithUsage 非流式响应透传（带 usage 和内容提取）
-func passthroughNonStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*PassthroughResult, *types.NewAPIError) {
+func passthroughNonStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, checkStopReason bool) (*PassthroughResult, *types.NewAPIError) {
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
@@ -193,7 +201,7 @@ func passthroughNonStreamResponseWithUsage(c *gin.Context, resp *http.Response, 
 		return nil, apiErr
 	}
 
-	result := GetPassthroughResult(responseBody, false)
+	result := getPassthroughResult(responseBody, false, checkStopReason)
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 	return result, nil
 }
@@ -209,10 +217,10 @@ type PassthroughResult struct {
 }
 
 // extractUsageAndContentFromStreamData 从流式数据中提取 usage 和内容
-func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
+func extractUsageAndContentFromStreamData(data []byte, checkStopReason bool) *PassthroughResult {
 	trimmedData := bytes.TrimSpace(data)
 	if bytes.HasPrefix(trimmedData, []byte("{")) && common.Unmarshal(trimmedData, &map[string]interface{}{}) == nil {
-		return extractUsageAndContentFromResponse(trimmedData)
+		return extractUsageAndContentFromResponse(trimmedData, checkStopReason)
 	}
 
 	result := &PassthroughResult{}
@@ -283,7 +291,9 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 					}
 				}
 			}
-			markStopReasonError(result, streamResp.StopReason, chunkContent)
+			if checkStopReason {
+				markStopReasonError(result, streamResp.StopReason, chunkContent)
+			}
 		}
 	}
 
@@ -304,7 +314,7 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 }
 
 // extractUsageAndContentFromResponse 从非流式响应中提取 usage 和内容
-func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult {
+func extractUsageAndContentFromResponse(responseBody []byte, checkStopReason bool) *PassthroughResult {
 	result := &PassthroughResult{}
 
 	var response struct {
@@ -352,7 +362,9 @@ func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult 
 				}
 			}
 		}
-		markStopReasonError(result, response.StopReason, result.ResponseContent)
+		if checkStopReason {
+			markStopReasonError(result, response.StopReason, result.ResponseContent)
+		}
 	}
 	result.ResponseBody = string(responseBody)
 
@@ -400,6 +412,18 @@ func markStopReasonError(result *PassthroughResult, stopReason json.RawMessage, 
 	result.UpstreamErrorMessage = message
 }
 
+func markAugmentStatusError(result *PassthroughResult, augmentStatus string) {
+	if result == nil || !isAugmentStatusFailure(augmentStatus) {
+		return
+	}
+	result.UpstreamError = true
+	result.UpstreamErrorMessage = "upstream X-Augment-Status=500"
+}
+
+func isAugmentStatusFailure(augmentStatus string) bool {
+	return strings.TrimSpace(augmentStatus) == "500"
+}
+
 func isJSONNullRaw(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
 	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
@@ -407,10 +431,14 @@ func isJSONNullRaw(raw json.RawMessage) bool {
 
 // GetPassthroughResult 从响应中提取完整结果
 func GetPassthroughResult(responseBody []byte, isStream bool) *PassthroughResult {
+	return getPassthroughResult(responseBody, isStream, true)
+}
+
+func getPassthroughResult(responseBody []byte, isStream bool, checkStopReason bool) *PassthroughResult {
 	if isStream {
-		return extractUsageAndContentFromStreamData(responseBody)
+		return extractUsageAndContentFromStreamData(responseBody, checkStopReason)
 	}
-	return extractUsageAndContentFromResponse(responseBody)
+	return extractUsageAndContentFromResponse(responseBody, checkStopReason)
 }
 
 // DoPassthroughRequest 执行传透请求（供外部调用）
