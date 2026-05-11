@@ -35,6 +35,7 @@ type Pricing struct {
 	SupportedEndpointTypes []constant.EndpointType `json:"supported_endpoint_types"`
 	BillingMode            string                  `json:"billing_mode,omitempty"`
 	BillingExpr            string                  `json:"billing_expr,omitempty"`
+	MinimumCharge          *float64                `json:"minimum_charge,omitempty"`
 	PricingVersion         string                  `json:"pricing_version,omitempty"`
 }
 
@@ -336,6 +337,9 @@ func updatePricing() {
 				pricing.BillingMode = billingMode
 				pricing.BillingExpr = expr
 			}
+		}
+		if minCharge, ok := billing_setting.GetMinimumCharge(model); ok {
+			pricing.MinimumCharge = &minCharge
 		}
 		pricingMap = append(pricingMap, pricing)
 	}

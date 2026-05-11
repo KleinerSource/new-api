@@ -40,6 +40,7 @@ const EMPTY_MODEL = {
   imagePrice: '',
   audioInputPrice: '',
   audioOutputPrice: '',
+  minimumCharge: '',
   billingExpr: '',
   requestRuleExpr: '',
   rawRatios: {
@@ -122,6 +123,7 @@ const normalizeCompletionRatioMeta = (rawMeta) => {
 };
 
 const buildModelState = (name, sourceMaps) => {
+  const minimumCharge = toNumericString(sourceMaps.MinimumCharge?.[name]);
   const billingMode = sourceMaps.ModelBillingMode?.[name];
   if (billingMode === 'tiered_expr') {
     const fullBillingExpr = sourceMaps.ModelBillingExpr?.[name] || '';
@@ -133,6 +135,7 @@ const buildModelState = (name, sourceMaps) => {
       billingMode: 'tiered_expr',
       billingExpr,
       requestRuleExpr,
+      minimumCharge,
       rawRatios: { ...EMPTY_MODEL.rawRatios },
       hasConflict: false,
     };
@@ -199,6 +202,7 @@ const buildModelState = (name, sourceMaps) => {
       toNumberOrNull(audioInputPrice) !== null && hasValue(audioCompletionRatio)
         ? formatNumber(Number(audioInputPrice) * Number(audioCompletionRatio))
         : '',
+    minimumCharge,
     requestRuleExpr: '',
     rawRatios: {
       modelRatio,
@@ -289,22 +293,25 @@ export const getModelWarnings = (model, t) => {
 };
 
 export const buildSummaryText = (model, t) => {
+  const minChargeSuffix = hasValue(model.minimumCharge)
+    ? `，${t('保底')} $${model.minimumCharge}`
+    : '';
   const requestRuleSuffix =
     model.billingMode === 'tiered_expr' && model.requestRuleExpr
     ? `，${t('请求规则')}`
     : '';
   if (model.billingMode === 'tiered_expr') {
     const expr = model.billingExpr;
-    if (!expr) return `${t('表达式计费')}${requestRuleSuffix}`;
+    if (!expr) return `${t('表达式计费')}${requestRuleSuffix}${minChargeSuffix}`;
     const tierCount = (expr.match(/tier\(/g) || []).length;
     if (tierCount === 0) {
-      return `${t('表达式计费')}${requestRuleSuffix}`;
+      return `${t('表达式计费')}${requestRuleSuffix}${minChargeSuffix}`;
     }
-    return `${t('阶梯计费')} (${tierCount} ${t('档')})${requestRuleSuffix}`;
+    return `${t('阶梯计费')} (${tierCount} ${t('档')})${requestRuleSuffix}${minChargeSuffix}`;
   }
 
   if (model.billingMode === 'per-request' && hasValue(model.fixedPrice)) {
-    return `${t('按次')} $${model.fixedPrice} / ${t('次')}${requestRuleSuffix}`;
+    return `${t('按次')} $${model.fixedPrice} / ${t('次')}${requestRuleSuffix}${minChargeSuffix}`;
   }
 
   if (hasValue(model.inputPrice)) {
@@ -318,10 +325,10 @@ export const buildSummaryText = (model, t) => {
     ].filter(hasValue).length;
     const extraLabel =
       extraCount > 0 ? `，${t('额外价格项')} ${extraCount}` : '';
-    return `${t('输入')} $${model.inputPrice}${extraLabel}${requestRuleSuffix}`;
+    return `${t('输入')} $${model.inputPrice}${extraLabel}${requestRuleSuffix}${minChargeSuffix}`;
   }
 
-  return `${t('未设置价格')}${requestRuleSuffix}`;
+  return `${t('未设置价格')}${requestRuleSuffix}${minChargeSuffix}`;
 };
 
 export const buildOptionalFieldToggles = (model) => ({
@@ -459,6 +466,17 @@ export const buildPreviewRows = (model, t) => {
     model.requestRuleExpr,
   );
 
+  const appendMinimumCharge = (rows) => {
+    if (hasValue(model.minimumCharge)) {
+      rows.push({
+        key: 'MinimumCharge',
+        label: 'MinimumCharge',
+        value: `$${model.minimumCharge} / ${t('次')}`,
+      });
+    }
+    return rows;
+  };
+
   if (model.billingMode === 'tiered_expr') {
     const rows = [
       {
@@ -484,7 +502,7 @@ export const buildPreviewRows = (model, t) => {
               : finalBillingExpr,
       });
     }
-    return rows;
+    return appendMinimumCharge(rows);
   }
 
   if (model.billingMode === 'per-request') {
@@ -495,7 +513,7 @@ export const buildPreviewRows = (model, t) => {
         value: hasValue(model.fixedPrice) ? model.fixedPrice : t('空'),
       },
     ];
-    return rows;
+    return appendMinimumCharge(rows);
   }
 
   const inputPrice = toNumberOrNull(model.inputPrice);
@@ -551,7 +569,7 @@ export const buildPreviewRows = (model, t) => {
           : t('空'),
       },
     ];
-    return rows;
+    return appendMinimumCharge(rows);
   }
 
   const completionPrice = toNumberOrNull(model.completionPrice);
@@ -615,7 +633,7 @@ export const buildPreviewRows = (model, t) => {
           : t('空'),
     },
   ];
-  return rows;
+  return appendMinimumCharge(rows);
 };
 
 export function useModelPricingEditorState({
@@ -648,6 +666,7 @@ export function useModelPricingEditorState({
       AudioCompletionRatio: parseOptionJSON(options.AudioCompletionRatio),
       ModelBillingMode: parseOptionJSON(options['billing_setting.billing_mode']),
       ModelBillingExpr: parseOptionJSON(options['billing_setting.billing_expr']),
+      MinimumCharge: parseOptionJSON(options['billing_setting.minimum_charge']),
     };
 
     const names = new Set([
@@ -663,6 +682,7 @@ export function useModelPricingEditorState({
       ...Object.keys(sourceMaps.AudioCompletionRatio),
       ...Object.keys(sourceMaps.ModelBillingMode),
       ...Object.keys(sourceMaps.ModelBillingExpr),
+      ...Object.keys(sourceMaps.MinimumCharge),
     ]);
 
     const nextModels = Array.from(names)
@@ -971,6 +991,7 @@ export function useModelPricingEditorState({
           imagePrice: selectedModel.imagePrice,
           audioInputPrice: selectedModel.audioInputPrice,
           audioOutputPrice: selectedModel.audioOutputPrice,
+          minimumCharge: selectedModel.minimumCharge,
           billingExpr: selectedModel.billingExpr || '',
           requestRuleExpr: selectedModel.requestRuleExpr || '',
         };
@@ -1037,6 +1058,7 @@ export function useModelPricingEditorState({
       const tieredOutput = {
         'billing_setting.billing_mode': {},
         'billing_setting.billing_expr': {},
+        'billing_setting.minimum_charge': {},
       };
 
       for (const model of models) {
@@ -1049,6 +1071,11 @@ export function useModelPricingEditorState({
             tieredOutput['billing_setting.billing_mode'][model.name] = 'tiered_expr';
             tieredOutput['billing_setting.billing_expr'][model.name] = finalBillingExpr;
           }
+        }
+
+        const minChargeNum = toNumberOrNull(model.minimumCharge);
+        if (minChargeNum !== null && minChargeNum > 0) {
+          tieredOutput['billing_setting.minimum_charge'][model.name] = minChargeNum;
         }
 
         // Always serialize ratio/price values for all models (including

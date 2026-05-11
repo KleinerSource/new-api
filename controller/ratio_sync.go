@@ -72,17 +72,19 @@ var pricingSyncFields = []string{
 	"model_price",
 	billing_setting.BillingModeField,
 	billing_setting.BillingExprField,
+	billing_setting.MinimumChargeField,
 }
 
 var numericPricingSyncFields = map[string]bool{
-	"model_ratio":            true,
-	"completion_ratio":       true,
-	"cache_ratio":            true,
-	"create_cache_ratio":     true,
-	"image_ratio":            true,
-	"audio_ratio":            true,
-	"audio_completion_ratio": true,
-	"model_price":            true,
+	"model_ratio":                      true,
+	"completion_ratio":                 true,
+	"cache_ratio":                      true,
+	"create_cache_ratio":               true,
+	"image_ratio":                      true,
+	"audio_ratio":                      true,
+	"audio_completion_ratio":           true,
+	"model_price":                      true,
+	billing_setting.MinimumChargeField: true,
 }
 
 type upstreamResult struct {
@@ -391,6 +393,7 @@ func FetchUpstreamRatios(c *gin.Context) {
 				AudioCompletionRatio *float64 `json:"audio_completion_ratio"`
 				BillingMode          string   `json:"billing_mode"`
 				BillingExpr          string   `json:"billing_expr"`
+				MinimumCharge        *float64 `json:"minimum_charge"`
 			}
 			if err := common.Unmarshal(body.Data, &pricingItems); err != nil {
 				logger.LogWarn(c.Request.Context(), "unrecognized data format from "+chItem.Name+": "+err.Error())
@@ -408,6 +411,7 @@ func FetchUpstreamRatios(c *gin.Context) {
 			modelPriceMap := make(map[string]float64)
 			billingModeMap := make(map[string]string)
 			billingExprMap := make(map[string]string)
+			minimumChargeMap := make(map[string]float64)
 
 			for _, item := range pricingItems {
 				if item.ModelName == "" {
@@ -438,6 +442,9 @@ func FetchUpstreamRatios(c *gin.Context) {
 				}
 				if item.AudioCompletionRatio != nil {
 					audioCompletionRatioMap[item.ModelName] = *item.AudioCompletionRatio
+				}
+				if item.MinimumCharge != nil && *item.MinimumCharge > 0 {
+					minimumChargeMap[item.ModelName] = *item.MinimumCharge
 				}
 			}
 
@@ -486,6 +493,9 @@ func FetchUpstreamRatios(c *gin.Context) {
 			}
 			if len(billingExprMap) > 0 {
 				converted[billing_setting.BillingExprField] = valueMap(billingExprMap)
+			}
+			if len(minimumChargeMap) > 0 {
+				converted[billing_setting.MinimumChargeField] = valueMap(minimumChargeMap)
 			}
 
 			ch <- upstreamResult{Name: uniqueName, Data: converted}

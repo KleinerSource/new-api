@@ -271,12 +271,17 @@ export default function UpstreamRatioSync(props) {
     'audio_completion_ratio',
   ];
 
-  const numericSyncFields = new Set([...ratioSyncFields, 'model_price']);
+  const numericSyncFields = new Set([
+    ...ratioSyncFields,
+    'model_price',
+    'minimum_charge',
+  ]);
   const syncFieldOrder = [
     ...ratioSyncFields,
     'model_price',
     'billing_mode',
     'billing_expr',
+    'minimum_charge',
   ];
 
   function getSyncFieldLabel(ratioType) {
@@ -291,6 +296,7 @@ export default function UpstreamRatioSync(props) {
       model_price: t('固定价格'),
       billing_mode: t('计费模式'),
       billing_expr: t('表达式计费'),
+      minimum_charge: t('保底消费'),
     };
     return typeMap[ratioType] || ratioType;
   }
@@ -322,7 +328,11 @@ export default function UpstreamRatioSync(props) {
 
   function getBillingCategory(ratioType) {
     if (ratioType === 'model_price') return 'price';
-    if (ratioType === 'billing_mode' || ratioType === 'billing_expr') {
+    if (
+      ratioType === 'billing_mode' ||
+      ratioType === 'billing_expr' ||
+      ratioType === 'minimum_charge'
+    ) {
       return 'tiered';
     }
     return 'ratio';
@@ -332,6 +342,7 @@ export default function UpstreamRatioSync(props) {
     const explicit = {
       billing_mode: 'billing_setting.billing_mode',
       billing_expr: 'billing_setting.billing_expr',
+      minimum_charge: 'billing_setting.minimum_charge',
     };
     if (explicit[ratioType]) return explicit[ratioType];
     return ratioType
@@ -440,6 +451,9 @@ export default function UpstreamRatioSync(props) {
       'billing_setting.billing_expr': JSON.parse(
         props.options['billing_setting.billing_expr'] || '{}',
       ),
+      'billing_setting.minimum_charge': JSON.parse(
+        props.options['billing_setting.minimum_charge'] || '{}',
+      ),
     };
 
     const conflicts = [];
@@ -531,6 +545,9 @@ export default function UpstreamRatioSync(props) {
         },
         'billing_setting.billing_expr': {
           ...currentRatios['billing_setting.billing_expr'],
+        },
+        'billing_setting.minimum_charge': {
+          ...currentRatios['billing_setting.minimum_charge'],
         },
       };
 
@@ -1100,6 +1117,9 @@ export default function UpstreamRatioSync(props) {
             ),
             'billing_setting.billing_expr': JSON.parse(
               props.options['billing_setting.billing_expr'] || '{}',
+            ),
+            'billing_setting.minimum_charge': JSON.parse(
+              props.options['billing_setting.minimum_charge'] || '{}',
             ),
           };
           try {
