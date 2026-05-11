@@ -23,6 +23,7 @@ import SiderBar from './SiderBar';
 import App from '../../App';
 import FooterBar from './Footer';
 import { ToastContainer } from 'react-toastify';
+import ErrorBoundary from '../common/ErrorBoundary';
 import React, { useContext, useEffect, useState } from 'react';
 import { useIsMobile } from '../../hooks/common/useIsMobile';
 import { useSidebarCollapsed } from '../../hooks/common/useSidebarCollapsed';
@@ -37,10 +38,11 @@ import {
 import { UserContext } from '../../context/User';
 import { StatusContext } from '../../context/Status';
 import { useLocation } from 'react-router-dom';
+import { normalizeLanguage } from '../../i18n/language';
 const { Sider, Content, Header } = Layout;
 
 const PageLayout = () => {
-  const [, userDispatch] = useContext(UserContext);
+  const [userState, userDispatch] = useContext(UserContext);
   const [, statusDispatch] = useContext(StatusContext);
   const isMobile = useIsMobile();
   const [collapsed, , setCollapsed] = useSidebarCollapsed();
@@ -113,11 +115,34 @@ const PageLayout = () => {
         linkElement.href = logo;
       }
     }
-    const savedLang = localStorage.getItem('i18nextLng');
-    if (savedLang) {
-      i18n.changeLanguage(savedLang);
+  }, []);
+
+  useEffect(() => {
+    let preferredLang;
+
+    if (userState?.user?.setting) {
+      try {
+        const settings = JSON.parse(userState.user.setting);
+        preferredLang = normalizeLanguage(settings.language);
+      } catch (e) {
+        // Ignore parse errors
+      }
     }
-  }, [i18n]);
+
+    if (!preferredLang) {
+      const savedLang = localStorage.getItem('i18nextLng');
+      if (savedLang) {
+        preferredLang = normalizeLanguage(savedLang);
+      }
+    }
+
+    if (preferredLang) {
+      localStorage.setItem('i18nextLng', preferredLang);
+      if (preferredLang !== i18n.language) {
+        i18n.changeLanguage(preferredLang);
+      }
+    }
+  }, [i18n, userState?.user?.setting]);
 
   return (
     <Layout
@@ -192,7 +217,9 @@ const PageLayout = () => {
               position: 'relative',
             }}
           >
-            <App />
+            <ErrorBoundary>
+              <App />
+            </ErrorBoundary>
           </Content>
           {!shouldHideFooter && (
             <Layout.Footer

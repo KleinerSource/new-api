@@ -18,9 +18,9 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import React from 'react';
-import { Card, Avatar, Typography, Table, Tag } from '@douyinfe/semi-ui';
+import { Avatar, Typography, Table, Tag } from '@douyinfe/semi-ui';
 import { IconCoinMoneyStroked } from '@douyinfe/semi-icons';
-import { calculateModelPrice } from '../../../../../helpers';
+import { calculateModelPrice, getModelPriceItems } from '../../../../../helpers';
 
 const { Text } = Typography;
 
@@ -28,6 +28,7 @@ const ModelPricingTable = ({
   modelData,
   groupRatio,
   currency,
+  siteDisplayType,
   tokenUnit,
   displayPrice,
   showRatio,
@@ -57,6 +58,7 @@ const ModelPricingTable = ({
             tokenUnit,
             displayPrice,
             currency,
+            quotaDisplayType: siteDisplayType,
           })
         : { inputPrice: '-', outputPrice: '-', price: '-' };
 
@@ -69,17 +71,14 @@ const ModelPricingTable = ({
         group: group,
         ratio: groupRatioValue,
         billingType:
-          modelData?.quota_type === 0
-            ? t('按量计费')
-            : modelData?.quota_type === 1
-              ? t('按次计费')
-              : '-',
-        inputPrice: modelData?.quota_type === 0 ? priceData.inputPrice : '-',
-        outputPrice:
-          modelData?.quota_type === 0
-            ? priceData.completionPrice || priceData.outputPrice
-            : '-',
-        fixedPrice: modelData?.quota_type === 1 ? priceData.price : '-',
+          modelData?.billing_mode === 'tiered_expr'
+            ? t('动态计费')
+            : modelData?.quota_type === 0
+              ? t('按量计费')
+              : modelData?.quota_type === 1
+                ? t('按次计费')
+                : '-',
+        priceItems: getModelPriceItems(priceData, t, siteDisplayType),
       };
     });
 
@@ -97,20 +96,21 @@ const ModelPricingTable = ({
       },
     ];
 
-    // 如果显示倍率，添加倍率列
-    if (showRatio) {
+    const isDynamic = modelData?.billing_mode === 'tiered_expr';
+
+    // 动态计费时始终显示倍率列，否则根据设置
+    if (showRatio || isDynamic) {
       columns.push({
-        title: t('倍率'),
+        title: t('分组倍率'),
         dataIndex: 'ratio',
         render: (text) => (
-          <Tag color='white' size='small' shape='circle'>
+          <Tag color='blue' size='small' shape='circle'>
             {text}x
           </Tag>
         ),
       });
     }
 
-    // 添加计费类型列
     columns.push({
       title: t('计费类型'),
       dataIndex: 'billingType',
@@ -118,6 +118,7 @@ const ModelPricingTable = ({
         let color = 'white';
         if (text === t('按量计费')) color = 'violet';
         else if (text === t('按次计费')) color = 'teal';
+        else if (text === t('动态计费')) color = 'amber';
         return (
           <Tag color={color} size='small' shape='circle'>
             {text || '-'}
@@ -126,48 +127,31 @@ const ModelPricingTable = ({
       },
     });
 
-    // 根据计费类型添加价格列
-    if (modelData?.quota_type === 0) {
-      // 按量计费
-      columns.push(
-        {
-          title: t('提示'),
-          dataIndex: 'inputPrice',
-          render: (text) => (
-            <>
-              <div className='font-semibold text-orange-600'>{text}</div>
-              <div className='text-xs text-gray-500'>
-                / {tokenUnit === 'K' ? '1K' : '1M'} tokens
+    columns.push({
+      title: siteDisplayType === 'TOKENS' ? t('计费摘要') : t('价格摘要'),
+      dataIndex: 'priceItems',
+      render: (items) => {
+        if (items.length === 1 && items[0].isDynamic) {
+          return (
+            <Text type='tertiary' size='small'>
+              {t('见上方动态计费详情')}
+            </Text>
+          );
+        }
+        return (
+          <div className='space-y-1'>
+            {items.map((item) => (
+              <div key={item.key}>
+                <div className='font-semibold text-orange-600'>
+                  {item.label} {item.value}
+                </div>
+                <div className='text-xs text-gray-500'>{item.suffix}</div>
               </div>
-            </>
-          ),
-        },
-        {
-          title: t('补全'),
-          dataIndex: 'outputPrice',
-          render: (text) => (
-            <>
-              <div className='font-semibold text-orange-600'>{text}</div>
-              <div className='text-xs text-gray-500'>
-                / {tokenUnit === 'K' ? '1K' : '1M'} tokens
-              </div>
-            </>
-          ),
-        },
-      );
-    } else {
-      // 按次计费
-      columns.push({
-        title: t('价格'),
-        dataIndex: 'fixedPrice',
-        render: (text) => (
-          <>
-            <div className='font-semibold text-orange-600'>{text}</div>
-            <div className='text-xs text-gray-500'>/ 次</div>
-          </>
-        ),
-      });
-    }
+            ))}
+          </div>
+        );
+      },
+    });
 
     return (
       <Table
@@ -182,7 +166,7 @@ const ModelPricingTable = ({
   };
 
   return (
-    <Card className='!rounded-2xl shadow-sm border-0'>
+    <div>
       <div className='flex items-center mb-4'>
         <Avatar size='small' color='orange' className='mr-2 shadow-md'>
           <IconCoinMoneyStroked size={16} />
@@ -210,7 +194,7 @@ const ModelPricingTable = ({
         </div>
       )}
       {renderGroupPriceTable()}
-    </Card>
+    </div>
   );
 };
 

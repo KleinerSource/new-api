@@ -12,6 +12,7 @@ func SetCustomRouter(router *gin.Engine) {
 	// ==================== Token 相关接口 ====================
 	// /usage/api - Token 范畴接口，不限流（已有 TokenAuth 认证）
 	usageApiRoute := router.Group("/usage/api")
+	usageApiRoute.Use(middleware.RouteTag("api"))
 	usageApiRoute.Use(middleware.TokenAuth())
 	{
 		usageApiRoute.GET("/balance", controller.GetTokenBalance)
@@ -21,10 +22,11 @@ func SetCustomRouter(router *gin.Engine) {
 	// ==================== 透传模式路由 ====================
 	// /chat-stream - 透传模式路由（根路径）
 	chatStreamRouter := router.Group("/chat-stream")
+	chatStreamRouter.Use(middleware.RouteTag("relay"))
+	chatStreamRouter.Use(middleware.SystemPerformanceCheck())
 	chatStreamRouter.Use(middleware.TokenAuth())
 	chatStreamRouter.Use(middleware.ModelRequestRateLimit())
 	{
 		chatStreamRouter.POST("", controller.RelayPassthrough)
 	}
 }
-

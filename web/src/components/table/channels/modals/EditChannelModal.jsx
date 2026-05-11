@@ -27,7 +27,7 @@ import {
   verifyJSON,
 } from '../../../../helpers';
 import { useIsMobile } from '../../../../hooks/common/useIsMobile';
-import { CHANNEL_OPTIONS } from '../../../../constants';
+import { CHANNEL_OPTIONS, MODEL_FETCHABLE_CHANNEL_TYPES } from '../../../../constants';
 import {
   SideSheet,
   Space,
@@ -47,6 +47,8 @@ import {
   Highlight,
   Input,
   Tooltip,
+  Collapse,
+  Dropdown,
 } from '@douyinfe/semi-ui';
 import {
   getChannelModels,
@@ -59,11 +61,13 @@ import ModelSelectModal from './ModelSelectModal';
 import SingleModelSelectModal from './SingleModelSelectModal';
 import OllamaModelModal from './OllamaModelModal';
 import CodexOAuthModal from './CodexOAuthModal';
+import ParamOverrideEditorModal from './ParamOverrideEditorModal';
 import JSONEditor from '../../../common/ui/JSONEditor';
 import SecureVerificationModal from '../../../common/modals/SecureVerificationModal';
 import StatusCodeRiskGuardModal from './StatusCodeRiskGuardModal';
 import ChannelKeyDisplay from '../../../common/ui/ChannelKeyDisplay';
 import { useSecureVerification } from '../../../../hooks/common/useSecureVerification';
+import { parseChannelConnectionString } from '../../../../helpers/token';
 import { createApiCalls } from '../../../../services/secureVerification';
 import {
   collectInvalidStatusCodeEntries,
@@ -75,10 +79,10 @@ import {
   IconServer,
   IconSetting,
   IconCode,
+  IconCopy,
   IconGlobe,
   IconBolt,
   IconSearch,
-  IconChevronUp,
   IconChevronDown,
 } from '@douyinfe/semi-icons';
 
@@ -98,6 +102,32 @@ const REGION_EXAMPLE = {
   'gemini-1.5-flash-002': 'europe-west2',
   'claude-3-5-sonnet-20240620': 'europe-west1',
 };
+const UPSTREAM_DETECTED_MODEL_PREVIEW_LIMIT = 8;
+const ADVANCED_SETTINGS_EXPANDED_KEY = 'channel-advanced-settings-expanded';
+
+const PARAM_OVERRIDE_LEGACY_TEMPLATE = {
+  temperature: 0,
+};
+
+const PARAM_OVERRIDE_OPERATIONS_TEMPLATE = {
+  operations: [
+    {
+      path: 'temperature',
+      mode: 'set',
+      value: 0.7,
+      conditions: [
+        {
+          path: 'model',
+          mode: 'prefix',
+          value: 'openai/',
+        },
+      ],
+      logic: 'AND',
+    },
+  ],
+};
+
+const DEPRECATED_DOUBAO_CODING_PLAN_BASE_URL = 'doubao-coding-plan';
 
 // 支持并且已适配通过接口获取模型列表的渠道类型
 const MODEL_FETCHABLE_TYPES = new Set([
@@ -148,6 +178,7 @@ const EditChannelModal = (props) => {
     base_url: '',
     other: '',
     model_mapping: '',
+    param_override: '',
     status_code_mapping: '',
     models: [],
     auto_ban: 1,
@@ -177,7 +208,13 @@ const EditChannelModal = (props) => {
     allow_safety_identifier: false,
     allow_include_obfuscation: false,
     allow_inference_geo: false,
+    allow_speed: false,
     claude_beta_query: false,
+    upstream_model_update_check_enabled: false,
+    upstream_model_update_auto_sync_enabled: false,
+    upstream_model_update_last_check_time: 0,
+    upstream_model_update_last_detected_models: [],
+    upstream_model_update_ignored_models: '',
   };
   const [batch, setBatch] = useState(false);
   const [multiToSingle, setMultiToSingle] = useState(false);
@@ -191,6 +228,7 @@ const EditChannelModal = (props) => {
   const [fullModels, setFullModels] = useState([]);
   const [modelGroups, setModelGroups] = useState([]);
   const [customModel, setCustomModel] = useState('');
+  const [modelSearchValue, setModelSearchValue] = useState('');
   const [modalImageUrl, setModalImageUrl] = useState('');
   const [isModalOpenurl, setIsModalOpenurl] = useState(false);
   const [modelModalVisible, setModelModalVisible] = useState(false);
@@ -231,10 +269,122 @@ const EditChannelModal = (props) => {
       return [];
     }
   }, [inputs.model_mapping]);
+  const redirectModelKeyList = useMemo(() => {
+    const mapping = inputs.model_mapping;
+    if (typeof mapping !== 'string') return [];
+    const trimmed = mapping.trim();
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return [];
+      }
+      const keys = Object.keys(parsed)
+        .map((key) => key.trim())
+        .filter((key) => key);
+      return Array.from(new Set(keys));
+    } catch (error) {
+      return [];
+    }
+  }, [inputs.model_mapping]);
+  const upstreamDetectedModels = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (inputs.upstream_model_update_last_detected_models || [])
+            .map((model) => String(model || '').trim())
+            .filter(Boolean),
+        ),
+      ),
+    [inputs.upstream_model_update_last_detected_models],
+  );
+  const upstreamDetectedModelsPreview = useMemo(
+    () => upstreamDetectedModels.slice(0, UPSTREAM_DETECTED_MODEL_PREVIEW_LIMIT),
+    [upstreamDetectedModels],
+  );
+  const upstreamDetectedModelsOmittedCount =
+    upstreamDetectedModels.length - upstreamDetectedModelsPreview.length;
+  const modelSearchMatchedCount = useMemo(() => {
+    const keyword = modelSearchValue.trim();
+    if (!keyword) {
+      return modelOptions.length;
+    }
+    return modelOptions.reduce(
+      (count, option) => count + (selectFilter(keyword, option) ? 1 : 0),
+      0,
+    );
+  }, [modelOptions, modelSearchValue]);
+  const modelSearchHintText = useMemo(() => {
+    const keyword = modelSearchValue.trim();
+    if (!keyword || modelSearchMatchedCount !== 0) {
+      return '';
+    }
+    return t('未匹配到模型，按回车键可将「{{name}}」作为自定义模型名添加', {
+      name: keyword,
+    });
+  }, [modelSearchMatchedCount, modelSearchValue, t]);
+  const paramOverrideMeta = useMemo(() => {
+    const raw =
+      typeof inputs.param_override === 'string'
+        ? inputs.param_override.trim()
+        : '';
+    if (!raw) {
+      return {
+        tagLabel: t('不更改'),
+        tagColor: 'grey',
+        preview: t(
+          '此项可选，用于覆盖请求参数。不支持覆盖 stream 参数',
+        ),
+      };
+    }
+    if (!verifyJSON(raw)) {
+      return {
+        tagLabel: t('JSON格式错误'),
+        tagColor: 'red',
+        preview: raw,
+      };
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      const pretty = JSON.stringify(parsed, null, 2);
+      if (
+        parsed &&
+        typeof parsed === 'object' &&
+        !Array.isArray(parsed) &&
+        Array.isArray(parsed.operations)
+      ) {
+        return {
+          tagLabel: `${t('新格式模板')} (${parsed.operations.length})`,
+          tagColor: 'cyan',
+          preview: pretty,
+        };
+      }
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return {
+          tagLabel: `${t('旧格式模板')} (${Object.keys(parsed).length})`,
+          tagColor: 'blue',
+          preview: pretty,
+        };
+      }
+      return {
+        tagLabel: t('自定义 JSON'),
+        tagColor: 'orange',
+        preview: pretty,
+      };
+    } catch (error) {
+      return {
+        tagLabel: t('JSON格式错误'),
+        tagColor: 'red',
+        preview: raw,
+      };
+    }
+  }, [inputs.param_override, t]);
   const [isIonetChannel, setIsIonetChannel] = useState(false);
   const [ionetMetadata, setIonetMetadata] = useState(null);
   const [codexOAuthModalVisible, setCodexOAuthModalVisible] = useState(false);
   const [codexCredentialRefreshing, setCodexCredentialRefreshing] =
+    useState(false);
+  const [paramOverrideEditorVisible, setParamOverrideEditorVisible] =
     useState(false);
 
   // 密钥显示状态
@@ -269,27 +419,32 @@ const EditChannelModal = (props) => {
     [],
   );
 
-  // 表单块导航相关状态
-  const formSectionRefs = useRef({
-    basicInfo: null,
-    apiConfig: null,
-    modelConfig: null,
-    advancedSettings: null,
-    channelExtraSettings: null,
-  });
-  const [currentSectionIndex, setCurrentSectionIndex] = useState(0);
-  const formSections = [
-    'basicInfo',
-    'apiConfig',
-    'modelConfig',
-    'advancedSettings',
-    'channelExtraSettings',
-  ];
+  // 剪贴板连接信息自动检测
+  const [clipboardConfig, setClipboardConfig] = useState(null);
+
+  // 高级设置折叠状态
+  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
+  const toggleAdvancedSettings = (open) => {
+    setAdvancedSettingsOpen(open);
+    localStorage.setItem(ADVANCED_SETTINGS_EXPANDED_KEY, String(open));
+  };
   const formContainerRef = useRef(null);
   const doubaoApiClickCountRef = useRef(0);
+  const initialBaseUrlRef = useRef('');
   const initialModelsRef = useRef([]);
   const initialModelMappingRef = useRef('');
   const initialStatusCodeMappingRef = useRef('');
+  const doubaoCodingPlanDeprecationMessage =
+    'Doubao Coding Plan 不再允许新增。根据火山方舟文档，Coding 套餐额度仅适用于 AI Coding 产品内调用，不适用于单独 API 调用；在非 AI Coding 产品中使用对应的 Base URL 和 API Key 可能被视为违规，并可能导致订阅停用或账号封禁。';
+  const canKeepDeprecatedDoubaoCodingPlan =
+    initialBaseUrlRef.current === DEPRECATED_DOUBAO_CODING_PLAN_BASE_URL;
+  const doubaoCodingPlanOptionLabel = (
+    <Tooltip content={doubaoCodingPlanDeprecationMessage} position='left'>
+      <span className='inline-flex items-center gap-2'>
+        <span>Doubao Coding Plan</span>
+      </span>
+    </Tooltip>
+  );
 
   // 2FA状态更新辅助函数
   const updateTwoFAState = (updates) => {
@@ -339,43 +494,6 @@ const EditChannelModal = (props) => {
     setShow2FAVerifyModal(false);
     setVerifyCode('');
     setVerifyLoading(false);
-  };
-
-  // 表单导航功能
-  const scrollToSection = (sectionKey) => {
-    const sectionElement = formSectionRefs.current[sectionKey];
-    if (sectionElement) {
-      sectionElement.scrollIntoView({
-        behavior: 'smooth',
-        block: 'start',
-        inline: 'nearest',
-      });
-    }
-  };
-
-  const navigateToSection = (direction) => {
-    const availableSections = formSections.filter((section) => {
-      if (section === 'apiConfig') {
-        return showApiConfigCard;
-      }
-      return true;
-    });
-
-    let newIndex;
-    if (direction === 'up') {
-      newIndex =
-        currentSectionIndex > 0
-          ? currentSectionIndex - 1
-          : availableSections.length - 1;
-    } else {
-      newIndex =
-        currentSectionIndex < availableSections.length - 1
-          ? currentSectionIndex + 1
-          : 0;
-    }
-
-    setCurrentSectionIndex(newIndex);
-    scrollToSection(availableSections[newIndex]);
   };
 
   const handleApiConfigSecretClick = () => {
@@ -446,6 +564,39 @@ const EditChannelModal = (props) => {
     settings[key] = value;
     const settingsJson = JSON.stringify(settings);
     handleInputChange('settings', settingsJson);
+  };
+
+  const applyClipboardConfig = (config) => {
+    if (!config) return;
+    setInputs((prev) => ({
+      ...prev,
+      key: config.key,
+      base_url: config.url,
+    }));
+    if (formApiRef.current) {
+      formApiRef.current.setValue('key', config.key);
+      formApiRef.current.setValue('base_url', config.url);
+    }
+    setClipboardConfig(null);
+    showSuccess(t('连接信息已填入'));
+  };
+
+  const pasteFromClipboard = async () => {
+    if (!navigator?.clipboard?.readText) {
+      showError(t('无法读取剪贴板'));
+      return;
+    }
+    try {
+      const text = await navigator.clipboard.readText();
+      const parsed = parseChannelConnectionString(text);
+      if (parsed) {
+        applyClipboardConfig(parsed);
+      } else {
+        showInfo(t('剪贴板中未检测到连接信息'));
+      }
+    } catch {
+      showError(t('无法读取剪贴板'));
+    }
   };
 
   const isIonetLocked = isIonetChannel && isEdit;
@@ -562,6 +713,112 @@ const EditChannelModal = (props) => {
     }
   };
 
+  const formatUnixTime = (timestamp) => {
+    const value = Number(timestamp || 0);
+    if (!value) {
+      return t('暂无');
+    }
+    return new Date(value * 1000).toLocaleString();
+  };
+
+  const copyParamOverrideJson = async () => {
+    const raw =
+      typeof inputs.param_override === 'string'
+        ? inputs.param_override.trim()
+        : '';
+    if (!raw) {
+      showInfo(t('暂无可复制 JSON'));
+      return;
+    }
+
+    let content = raw;
+    if (verifyJSON(raw)) {
+      try {
+        content = JSON.stringify(JSON.parse(raw), null, 2);
+      } catch (error) {
+        content = raw;
+      }
+    }
+
+    const ok = await copy(content);
+    if (ok) {
+      showSuccess(t('参数覆盖 JSON 已复制'));
+    } else {
+      showError(t('复制失败'));
+    }
+  };
+
+  const parseParamOverrideInput = () => {
+    const raw =
+      typeof inputs.param_override === 'string'
+        ? inputs.param_override.trim()
+        : '';
+    if (!raw) return null;
+    if (!verifyJSON(raw)) {
+      throw new Error(t('当前参数覆盖不是合法的 JSON'));
+    }
+    return JSON.parse(raw);
+  };
+
+  const applyParamOverrideTemplate = (
+    templateType = 'operations',
+    applyMode = 'fill',
+  ) => {
+    try {
+      const parsedCurrent = parseParamOverrideInput();
+      if (templateType === 'legacy') {
+        if (applyMode === 'fill') {
+          handleInputChange(
+            'param_override',
+            JSON.stringify(PARAM_OVERRIDE_LEGACY_TEMPLATE, null, 2),
+          );
+          return;
+        }
+        const currentLegacy =
+          parsedCurrent &&
+          typeof parsedCurrent === 'object' &&
+          !Array.isArray(parsedCurrent) &&
+          !Array.isArray(parsedCurrent.operations)
+            ? parsedCurrent
+            : {};
+        const merged = {
+          ...PARAM_OVERRIDE_LEGACY_TEMPLATE,
+          ...currentLegacy,
+        };
+        handleInputChange('param_override', JSON.stringify(merged, null, 2));
+        return;
+      }
+
+      if (applyMode === 'fill') {
+        handleInputChange(
+          'param_override',
+          JSON.stringify(PARAM_OVERRIDE_OPERATIONS_TEMPLATE, null, 2),
+        );
+        return;
+      }
+      const currentOperations =
+        parsedCurrent &&
+        typeof parsedCurrent === 'object' &&
+        !Array.isArray(parsedCurrent) &&
+        Array.isArray(parsedCurrent.operations)
+          ? parsedCurrent.operations
+          : [];
+      const merged = {
+        operations: [
+          ...currentOperations,
+          ...PARAM_OVERRIDE_OPERATIONS_TEMPLATE.operations,
+        ],
+      };
+      handleInputChange('param_override', JSON.stringify(merged, null, 2));
+    } catch (error) {
+      showError(error.message || t('模板应用失败'));
+    }
+  };
+
+  const clearParamOverride = () => {
+    handleInputChange('param_override', '');
+  };
+
   const loadChannel = async () => {
     setLoading(true);
     let res = await API.get(`/api/channel/${channelId}`);
@@ -652,7 +909,24 @@ const EditChannelModal = (props) => {
             parsedSettings.allow_include_obfuscation || false;
           data.allow_inference_geo =
             parsedSettings.allow_inference_geo || false;
+          data.allow_speed = parsedSettings.allow_speed || false;
           data.claude_beta_query = parsedSettings.claude_beta_query || false;
+          data.upstream_model_update_check_enabled =
+            parsedSettings.upstream_model_update_check_enabled === true;
+          data.upstream_model_update_auto_sync_enabled =
+            parsedSettings.upstream_model_update_auto_sync_enabled === true;
+          data.upstream_model_update_last_check_time =
+            Number(parsedSettings.upstream_model_update_last_check_time) || 0;
+          data.upstream_model_update_last_detected_models = Array.isArray(
+            parsedSettings.upstream_model_update_last_detected_models,
+          )
+            ? parsedSettings.upstream_model_update_last_detected_models
+            : [];
+          data.upstream_model_update_ignored_models = Array.isArray(
+            parsedSettings.upstream_model_update_ignored_models,
+          )
+            ? parsedSettings.upstream_model_update_ignored_models.join(',')
+            : '';
         } catch (error) {
           console.error('解析其他设置失败:', error);
           data.azure_responses_version = '';
@@ -665,7 +939,13 @@ const EditChannelModal = (props) => {
           data.allow_safety_identifier = false;
           data.allow_include_obfuscation = false;
           data.allow_inference_geo = false;
+          data.allow_speed = false;
           data.claude_beta_query = false;
+          data.upstream_model_update_check_enabled = false;
+          data.upstream_model_update_auto_sync_enabled = false;
+          data.upstream_model_update_last_check_time = 0;
+          data.upstream_model_update_last_detected_models = [];
+          data.upstream_model_update_ignored_models = '';
         }
       } else {
         // 兼容历史数据：老渠道没有 settings 时，默认按 json 展示
@@ -677,7 +957,13 @@ const EditChannelModal = (props) => {
         data.allow_safety_identifier = false;
         data.allow_include_obfuscation = false;
         data.allow_inference_geo = false;
+        data.allow_speed = false;
         data.claude_beta_query = false;
+        data.upstream_model_update_check_enabled = false;
+        data.upstream_model_update_auto_sync_enabled = false;
+        data.upstream_model_update_last_check_time = 0;
+        data.upstream_model_update_last_detected_models = [];
+        data.upstream_model_update_ignored_models = '';
       }
 
       if (
@@ -688,6 +974,7 @@ const EditChannelModal = (props) => {
         data.base_url = 'https://ark.cn-beijing.volces.com';
       }
 
+      initialBaseUrlRef.current = data.base_url || '';
       setInputs(data);
       if (formApiRef.current) {
         formApiRef.current.setValues(data);
@@ -733,7 +1020,27 @@ const EditChannelModal = (props) => {
       const managedByIonet = !!parsedIonet;
       setIsIonetChannel(managedByIonet);
       setIonetMetadata(parsedIonet);
-      // console.log(data);
+
+      // Smart expand: auto-open advanced settings if any advanced field has a value
+      const hasAdvancedValues =
+        (data.model_mapping && data.model_mapping.trim()) ||
+        (data.param_override && data.param_override.trim()) ||
+        (data.status_code_mapping && data.status_code_mapping.trim()) ||
+        (data.header_override && data.header_override.trim()) ||
+        (data.tag && data.tag.trim()) ||
+        (data.remark && data.remark.trim()) ||
+        (data.priority && data.priority !== 0) ||
+        (data.weight && data.weight !== 0) ||
+        (data.proxy && data.proxy.trim()) ||
+        (data.system_prompt && data.system_prompt.trim()) ||
+        data.thinking_to_content ||
+        data.pass_through_body_enabled ||
+        data.force_format ||
+        data.claude_beta_query ||
+        data.system_prompt_override;
+      if (hasAdvancedValues) {
+        setAdvancedSettingsOpen(true);
+      }
     } else {
       showError(message);
     }
@@ -808,7 +1115,7 @@ const EditChannelModal = (props) => {
     const mappingKey = String(pairKey ?? '').trim();
     if (!mappingKey) return;
 
-    if (!MODEL_FETCHABLE_TYPES.has(inputs.type)) {
+    if (!MODEL_FETCHABLE_CHANNEL_TYPES.has(inputs.type)) {
       return;
     }
 
@@ -1002,6 +1309,7 @@ const EditChannelModal = (props) => {
     fetchModels().then();
     fetchGroups().then();
     if (!isEdit) {
+      initialBaseUrlRef.current = '';
       setInputs(originInputs);
       if (formApiRef.current) {
         formApiRef.current.setValues(originInputs);
@@ -1019,17 +1327,28 @@ const EditChannelModal = (props) => {
   }, [inputs]);
 
   useEffect(() => {
+    setModelSearchValue('');
     if (props.visible) {
       if (isEdit) {
         loadChannel();
       } else {
         formApiRef.current?.setValues(getInitValues());
+        try {
+          navigator?.clipboard?.readText()?.then((text) => {
+            const parsed = parseChannelConnectionString(text);
+            if (parsed) {
+              setClipboardConfig(parsed);
+            }
+          }).catch(() => {});
+        } catch {}
       }
       fetchModelGroups();
       // 重置手动输入模式状态
       setUseManualInput(false);
-      // 重置导航状态
-      setCurrentSectionIndex(0);
+      // 编辑模式下恢复用户偏好，创建模式一律折叠
+      setAdvancedSettingsOpen(
+        isEdit && localStorage.getItem(ADVANCED_SETTINGS_EXPANDED_KEY) === 'true'
+      );
     } else {
       // 统一的模态框关闭重置逻辑
       resetModalState();
@@ -1073,6 +1392,9 @@ const EditChannelModal = (props) => {
     // 重置豆包隐藏入口状态
     setDoubaoApiEditUnlocked(false);
     doubaoApiClickCountRef.current = 0;
+    setModelSearchValue('');
+    // 重置高级设置折叠状态
+    setAdvancedSettingsOpen(false);
     // 清空表单中的key_mode字段
     if (formApiRef.current) {
       formApiRef.current.setValue('key_mode', undefined);
@@ -1081,6 +1403,8 @@ const EditChannelModal = (props) => {
     setInputs(getInitValues());
     // 重置密钥显示状态
     resetKeyDisplayState();
+    // 重置剪贴板检测状态
+    setClipboardConfig(null);
   };
 
   const handleVertexUploadChange = ({ fileList }) => {
@@ -1220,6 +1544,7 @@ const EditChannelModal = (props) => {
   const submit = async () => {
     const formValues = formApiRef.current ? formApiRef.current.getValues() : {};
     let localInputs = { ...formValues };
+    localInputs.param_override = inputs.param_override;
 
     if (localInputs.type === 57) {
       if (batch) {
@@ -1473,8 +1798,32 @@ const EditChannelModal = (props) => {
       }
       if (localInputs.type === 14) {
         settings.allow_inference_geo = localInputs.allow_inference_geo === true;
+        settings.allow_speed = localInputs.allow_speed === true;
         settings.claude_beta_query = localInputs.claude_beta_query === true;
       }
+    }
+
+    settings.upstream_model_update_check_enabled =
+      localInputs.upstream_model_update_check_enabled === true;
+    settings.upstream_model_update_auto_sync_enabled =
+      settings.upstream_model_update_check_enabled &&
+      localInputs.upstream_model_update_auto_sync_enabled === true;
+    settings.upstream_model_update_ignored_models = Array.from(
+      new Set(
+        String(localInputs.upstream_model_update_ignored_models || '')
+          .split(',')
+          .map((model) => model.trim())
+          .filter(Boolean),
+      ),
+    );
+    if (
+      !Array.isArray(settings.upstream_model_update_last_detected_models) ||
+      !settings.upstream_model_update_check_enabled
+    ) {
+      settings.upstream_model_update_last_detected_models = [];
+    }
+    if (typeof settings.upstream_model_update_last_check_time !== 'number') {
+      settings.upstream_model_update_last_check_time = 0;
     }
 
     localInputs.settings = JSON.stringify(settings);
@@ -1497,7 +1846,13 @@ const EditChannelModal = (props) => {
     delete localInputs.allow_safety_identifier;
     delete localInputs.allow_include_obfuscation;
     delete localInputs.allow_inference_geo;
+    delete localInputs.allow_speed;
     delete localInputs.claude_beta_query;
+    delete localInputs.upstream_model_update_check_enabled;
+    delete localInputs.upstream_model_update_auto_sync_enabled;
+    delete localInputs.upstream_model_update_last_check_time;
+    delete localInputs.upstream_model_update_last_detected_models;
+    delete localInputs.upstream_model_update_ignored_models;
 
     let res;
     localInputs.auto_ban = localInputs.auto_ban ? 1 : 0;
@@ -1800,71 +2155,48 @@ const EditChannelModal = (props) => {
       <SideSheet
         placement={isEdit ? 'right' : 'left'}
         title={
-          <Space>
-            <Tag color='blue' shape='circle'>
-              {isEdit ? t('编辑') : t('新建')}
-            </Tag>
-            <Title heading={4} className='m-0'>
-              {isEdit ? t('更新渠道信息') : t('创建新的渠道')}
-            </Title>
-          </Space>
+          <div className='flex items-center justify-between w-full'>
+            <Space>
+              <Tag color='blue' shape='circle'>
+                {isEdit ? t('编辑') : t('新建')}
+              </Tag>
+              <Title heading={4} className='m-0'>
+                {isEdit ? t('更新渠道信息') : t('创建新的渠道')}
+              </Title>
+            </Space>
+            {!isEdit && (
+              <Button
+                size='small'
+                type='tertiary'
+                className='ec-dbcd0a3c01b55203 shrink-0'
+                icon={<IconBolt />}
+                onClick={pasteFromClipboard}
+              >
+                {t('从剪贴板粘贴配置')}
+              </Button>
+            )}
+          </div>
         }
         bodyStyle={{ padding: '0' }}
         visible={props.visible}
         width={isMobile ? '100%' : 600}
         footer={
-          <div className='flex justify-between items-center bg-white'>
-            <div className='flex gap-2'>
-              <Button
-                size='small'
-                type='tertiary'
-                icon={<IconChevronUp />}
-                onClick={() => navigateToSection('up')}
-                style={{
-                  borderRadius: '50%',
-                  width: '32px',
-                  height: '32px',
-                  padding: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-                title={t('上一个表单块')}
-              />
-              <Button
-                size='small'
-                type='tertiary'
-                icon={<IconChevronDown />}
-                onClick={() => navigateToSection('down')}
-                style={{
-                  borderRadius: '50%',
-                  width: '32px',
-                  height: '32px',
-                  padding: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-                title={t('下一个表单块')}
-              />
-            </div>
-            <Space>
-              <Button
-                theme='solid'
-                onClick={() => formApiRef.current?.submitForm()}
-                icon={<IconSave />}
-              >
-                {t('提交')}
-              </Button>
-              <Button
-                theme='light'
-                type='primary'
-                onClick={handleCancel}
-                icon={<IconClose />}
-              >
-                {t('取消')}
-              </Button>
-            </Space>
+          <div className='flex justify-end items-center gap-2'>
+            <Button
+              theme='solid'
+              onClick={() => formApiRef.current?.submitForm()}
+              icon={<IconSave />}
+            >
+              {t('提交')}
+            </Button>
+            <Button
+              theme='light'
+              type='primary'
+              onClick={handleCancel}
+              icon={<IconClose />}
+            >
+              {t('取消')}
+            </Button>
           </div>
         }
         closeIcon={null}
@@ -1876,29 +2208,384 @@ const EditChannelModal = (props) => {
           getFormApi={(api) => (formApiRef.current = api)}
           onSubmit={submit}
         >
-          {() => (
-            <Spin spinning={loading}>
-              <div className='p-2 space-y-3' ref={formContainerRef}>
-                <div ref={(el) => (formSectionRefs.current.basicInfo = el)}>
-                  <Card className='!rounded-2xl shadow-sm border-0 mb-6'>
-                    {/* Header: Basic Info */}
-                    <div className='flex items-center mb-2'>
-                      <Avatar
-                        size='small'
-                        color='blue'
-                        className='mr-2 shadow-md'
-                      >
-                        <IconServer size={16} />
-                      </Avatar>
-                      <div>
-                        <Text className='text-lg font-medium'>
-                          {t('基本信息')}
-                        </Text>
-                        <div className='text-xs text-gray-600'>
-                          {t('渠道的基本配置信息')}
+          {() => {
+            const advancedSettingsContent = (
+              <div className='space-y-4'>
+                {/* Upstream Model Management Section */}
+                {MODEL_FETCHABLE_CHANNEL_TYPES.has(inputs.type) && (
+                <div className='pb-3 border-b border-gray-100'>
+                  <Text className='text-sm font-medium text-gray-500 mb-3 block'>
+                    {t('上游模型管理')}
+                  </Text>
+
+                  <Form.Switch
+                    field='upstream_model_update_check_enabled'
+                    label={t('是否检测上游模型更新')}
+                    checkedText={t('开')}
+                    uncheckedText={t('关')}
+                    onChange={(value) =>
+                      handleChannelOtherSettingsChange(
+                        'upstream_model_update_check_enabled',
+                        value,
+                      )
+                    }
+                    extraText={t(
+                      '开启后由后端定时任务检测该渠道上游模型变化',
+                    )}
+                  />
+                  <Form.Switch
+                    field='upstream_model_update_auto_sync_enabled'
+                    label={t('是否自动同步上游模型更新')}
+                    checkedText={t('开')}
+                    uncheckedText={t('关')}
+                    disabled={!inputs.upstream_model_update_check_enabled}
+                    onChange={(value) =>
+                      handleChannelOtherSettingsChange('upstream_model_update_auto_sync_enabled', value)
+                    }
+                    extraText={t('开启后检测到新增模型会自动加入当前渠道模型列表')}
+                  />
+                  <Form.Input
+                    field='upstream_model_update_ignored_models'
+                    label={t('已忽略模型')}
+                    placeholder={t(
+                      '例如：gpt-4.1-nano,regex:^claude-.*$,regex:^sora-.*$',
+                    )}
+                    extraText={t(
+                      '支持精确匹配；使用 regex: 开头可按正则匹配。',
+                    )}
+                    onChange={(value) =>
+                      handleInputChange(
+                        'upstream_model_update_ignored_models',
+                        value,
+                      )
+                    }
+                    showClear
+                  />
+                  <div className='text-xs text-gray-500 mb-2'>
+                    {t('上次检测时间')}:&nbsp;
+                    {formatUnixTime(
+                      inputs.upstream_model_update_last_check_time,
+                    )}
+                  </div>
+                  <div className='text-xs text-gray-500 mb-3'>
+                    {t('上次检测到可加入模型')}:&nbsp;
+                    {upstreamDetectedModels.length === 0 ? (
+                      t('暂无')
+                    ) : (
+                      <>
+                        <Tooltip
+                          position='topLeft'
+                          content={
+                            <div className='max-w-[640px] break-all text-xs leading-5'>
+                              {upstreamDetectedModels.join(', ')}
+                            </div>
+                          }
+                        >
+                          <span className='cursor-help break-all'>
+                            {upstreamDetectedModelsPreview.join(', ')}
+                          </span>
+                        </Tooltip>
+                        <span className='ml-1 text-gray-400'>
+                          {upstreamDetectedModelsOmittedCount > 0
+                            ? t('（共 {{total}} 个，省略 {{omit}} 个）', {
+                                total: upstreamDetectedModels.length,
+                                omit: upstreamDetectedModelsOmittedCount,
+                              })
+                            : t('（共 {{total}} 个）', {
+                                total: upstreamDetectedModels.length,
+                              })}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                )}
+
+                {/* Request Config Section */}
+                <div className='py-3 border-b border-gray-100'>
+                  <Text className='text-sm font-medium text-gray-500 mb-3 block'>
+                    {t('请求配置')}
+                  </Text>
+
+                  <div className='mb-4'>
+                    <div className='flex items-center justify-between gap-2 mb-1'>
+                      <Text className='text-sm font-medium'>{t('参数覆盖')}</Text>
+                      <Space>
+                        <Button
+                          size='small'
+                          type='primary'
+                          icon={<IconCode size={14} />}
+                          onClick={() => setParamOverrideEditorVisible(true)}
+                        >
+                          {t('可视化编辑')}
+                        </Button>
+                        <Dropdown
+                          trigger='click'
+                          position='bottomRight'
+                          menu={[
+                            { node: 'item', name: t('填充新模板'), onClick: () => applyParamOverrideTemplate('operations', 'fill') },
+                            { node: 'item', name: t('填充旧模板'), onClick: () => applyParamOverrideTemplate('legacy', 'fill') },
+                            { node: 'item', name: t('清空'), onClick: clearParamOverride },
+                          ]}
+                        >
+                          <Button size='small' type='tertiary'>
+                            {t('更多')} <IconChevronDown size={12} />
+                          </Button>
+                        </Dropdown>
+                      </Space>
+                    </div>
+                    <Text type='tertiary' size='small'>
+                      {t('此项可选，用于覆盖请求参数。不支持覆盖 stream 参数')}
+                    </Text>
+                    <div
+                      className='mt-2 rounded-xl p-3'
+                      style={{
+                        backgroundColor: 'var(--semi-color-fill-0)',
+                        border: '1px solid var(--semi-color-fill-2)',
+                      }}
+                    >
+                      <div className='flex items-center justify-between mb-2'>
+                        <Tag color={paramOverrideMeta.tagColor}>
+                          {paramOverrideMeta.tagLabel}
+                        </Tag>
+                        <Button
+                          size='small'
+                          icon={<IconCopy />}
+                          type='tertiary'
+                          onClick={copyParamOverrideJson}
+                        >
+                          {t('复制')}
+                        </Button>
+                      </div>
+                      <pre className='mb-0 text-xs leading-5 whitespace-pre-wrap break-all max-h-56 overflow-auto'>
+                        {paramOverrideMeta.preview}
+                      </pre>
+                    </div>
+                  </div>
+
+                  <Form.TextArea
+                    field='header_override'
+                    label={t('请求头覆盖')}
+                    placeholder={
+                      t('此项可选，用于覆盖请求头参数') +
+                      '\n' +
+                      t('格式示例：') +
+                      '\n{\n  "User-Agent": "Mozilla/5.0 ...",\n  "Authorization": "Bearer {api_key}"\n}'
+                    }
+                    autosize
+                    onChange={(value) =>
+                      handleInputChange('header_override', value)
+                    }
+                    extraText={
+                      <div className='flex flex-col gap-1'>
+                        <div className='flex gap-2 flex-wrap items-center'>
+                          <Text
+                            className='!text-semi-color-primary cursor-pointer'
+                            onClick={() =>
+                              handleInputChange(
+                                'header_override',
+                                JSON.stringify({ '*': true, 're:^X-Trace-.*$': true, 'X-Foo': '{client_header:X-Foo}', Authorization: 'Bearer {api_key}', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0' }, null, 2),
+                              )
+                            }
+                          >
+                            {t('填入模板')}
+                          </Text>
+                          <Text
+                            className='!text-semi-color-primary cursor-pointer'
+                            onClick={() =>
+                              handleInputChange('header_override', JSON.stringify({ '*': true }, null, 2))
+                            }
+                          >
+                            {t('填入透传模版')}
+                          </Text>
+                          <Text
+                            className='!text-semi-color-primary cursor-pointer'
+                            onClick={() => formatJsonField('header_override')}
+                          >
+                            {t('格式化')}
+                          </Text>
+                        </div>
+                        <div>
+                          <Text type='tertiary' size='small'>
+                            {t('支持变量：')}
+                          </Text>
+                          <div className='text-xs text-tertiary ml-2'>
+                            <div>
+                              {t('渠道密钥')}: {'{api_key}'}
+                            </div>
+                          </div>
                         </div>
                       </div>
+                    }
+                    showClear
+                  />
+                  <JSONEditor
+                    key={`status_code_mapping-${isEdit ? channelId : 'new'}`}
+                    field='status_code_mapping'
+                    label={t('状态码复写')}
+                    placeholder={
+                      t('此项可选，用于复写返回的状态码，仅影响本地判断，不修改返回到上游的状态码，比如将claude渠道的400错误复写为500（用于重试），请勿滥用该功能，例如：') +
+                      '\n' +
+                      JSON.stringify(STATUS_CODE_MAPPING_EXAMPLE, null, 2)
+                    }
+                    value={inputs.status_code_mapping || ''}
+                    onChange={(value) =>
+                      handleInputChange('status_code_mapping', value)
+                    }
+                    template={STATUS_CODE_MAPPING_EXAMPLE}
+                    templateLabel={t('填入模板')}
+                    editorType='keyValue'
+                    formApi={formApiRef.current}
+                    extraText={t('键为原状态码，值为要复写的状态码，仅影响本地判断')}
+                  />
+                </div>
+
+                {/* Channel Behavior Section */}
+                <div className='py-3 border-b border-gray-100'>
+                  <Text className='text-sm font-medium text-gray-500 mb-3 block'>
+                    {t('渠道行为')}
+                  </Text>
+
+                  <Form.Input
+                    field='tag'
+                    label={t('渠道标签')}
+                    placeholder={t('渠道标签')}
+                    showClear
+                    onChange={(value) => handleInputChange('tag', value)}
+                  />
+                  <Form.TextArea
+                    field='remark'
+                    label={t('备注')}
+                    placeholder={t('请输入备注（仅管理员可见）')}
+                    maxLength={255}
+                    showClear
+                    onChange={(value) => handleInputChange('remark', value)}
+                  />
+
+                  <Row gutter={12}>
+                    <Col span={12}>
+                      <Form.InputNumber
+                        field='priority'
+                        label={t('渠道优先级')}
+                        placeholder={t('渠道优先级')}
+                        min={0}
+                        onNumberChange={(value) => handleInputChange('priority', value)}
+                        style={{ width: '100%' }}
+                      />
+                    </Col>
+                    <Col span={12}>
+                      <Form.InputNumber
+                        field='weight'
+                        label={t('渠道权重')}
+                        placeholder={t('渠道权重')}
+                        min={0}
+                        onNumberChange={(value) => handleInputChange('weight', value)}
+                        style={{ width: '100%' }}
+                      />
+                    </Col>
+                  </Row>
+
+                  {inputs.type === 1 && (
+                    <>
+                      <div className='mt-4 mb-2 text-sm font-medium text-gray-700'>
+                        {t('字段透传控制')}
+                      </div>
+                      <Form.Switch field='allow_service_tier' label={t('允许 service_tier 透传')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('allow_service_tier', value)} extraText={t('service_tier 字段用于指定服务层级，允许透传可能导致实际计费高于预期。默认关闭以避免额外费用')} />
+                      <Form.Switch field='disable_store' label={t('禁用 store 透传')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('disable_store', value)} extraText={t('store 字段用于授权 OpenAI 存储请求数据以评估和优化产品。默认关闭，开启后可能导致 Codex 无法正常使用')} />
+                      <Form.Switch field='allow_safety_identifier' label={t('允许 safety_identifier 透传')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('allow_safety_identifier', value)} extraText={t('safety_identifier 字段用于帮助 OpenAI 识别可能违反使用政策的应用程序用户。默认关闭以保护用户隐私')} />
+                      <Form.Switch field='allow_include_obfuscation' label={t('允许 stream_options.include_obfuscation 透传')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('allow_include_obfuscation', value)} extraText={t('include_obfuscation 用于控制 Responses 流混淆字段。默认关闭以避免客户端关闭该安全保护')} />
+                    </>
+                  )}
+
+                  {inputs.type === 14 && (
+                    <>
+                      <div className='mt-4 mb-2 text-sm font-medium text-gray-700'>
+                        {t('字段透传控制')}
+                      </div>
+                      <Form.Switch field='allow_service_tier' label={t('允许 service_tier 透传')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('allow_service_tier', value)} extraText={t('service_tier 字段用于指定服务层级，允许透传可能导致实际计费高于预期。默认关闭以避免额外费用')} />
+                      <Form.Switch field='allow_inference_geo' label={t('允许 inference_geo 透传')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('allow_inference_geo', value)} extraText={t('inference_geo 字段用于控制 Claude 数据驻留推理区域。默认关闭以避免未经授权透传地域信息')} />
+                      <Form.Switch field='allow_speed' label={t('允许 speed 透传')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('allow_speed', value)} extraText={t('speed 字段用于控制 Claude 推理速度模式。默认关闭以避免意外切换到 fast 模式')} />
+                    </>
+                  )}
+                </div>
+
+                {/* Extra Settings Section */}
+                <div className='pt-3'>
+                  <Text className='text-sm font-medium text-gray-500 mb-3 block'>
+                    {t('额外设置')}
+                  </Text>
+
+                  {inputs.type === 14 && (
+                    <Form.Switch field='claude_beta_query' label={t('Claude 强制 beta=true')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('claude_beta_query', value)} extraText={t('开启后，该渠道请求 Claude 时将强制追加 ?beta=true（无需客户端手动传参）')} />
+                  )}
+
+                  {inputs.type === 1 && (
+                    <Form.Switch field='force_format' label={t('强制格式化')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelSettingsChange('force_format', value)} extraText={t('强制将响应格式化为 OpenAI 标准格式（只适用于OpenAI渠道类型）')} />
+                  )}
+
+                  <Form.Switch field='thinking_to_content' label={t('思考内容转换')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelSettingsChange('thinking_to_content', value)} extraText={t('将 reasoning_content 转换为 <think> 标签拼接到内容中')} />
+                  <Form.Switch field='pass_through_body_enabled' label={t('透传请求体')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelSettingsChange('pass_through_body_enabled', value)} extraText={t('启用请求体透传功能')} />
+
+                  <Form.Input field='proxy' label={t('代理地址')} placeholder={t('例如: socks5://user:pass@host:port')} onChange={(value) => handleChannelSettingsChange('proxy', value)} showClear extraText={t('用于配置网络代理，支持 socks5 协议')} />
+
+                  <Form.TextArea field='system_prompt' label={t('系统提示词')} placeholder={t('输入系统提示词，用户的系统提示词将优先于此设置')} onChange={(value) => handleChannelSettingsChange('system_prompt', value)} autosize showClear extraText={t('用户优先：如果用户在请求中指定了系统提示词，将优先使用用户的设置')} />
+                  <Form.Switch field='system_prompt_override' label={t('系统提示词拼接')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelSettingsChange('system_prompt_override', value)} extraText={t('如果用户请求中包含系统提示词，则使用此设置拼接到用户的系统提示词前面')} />
+                </div>
+              </div>
+            );
+
+            return (
+            <>
+            <Spin spinning={loading}>
+              <div className='p-2 space-y-3' ref={formContainerRef}>
+                {!isEdit && clipboardConfig && (
+                  <Banner
+                    type='info'
+                    className='ec-dbcd0a3c01b55203'
+                    description={
+                      <div className='flex items-center justify-between gap-2'>
+                        <span>{t('检测到剪贴板中的连接信息')}</span>
+                        <div className='flex gap-1'>
+                          <Button
+                            size='small'
+                            theme='solid'
+                            type='primary'
+                            onClick={() => applyClipboardConfig(clipboardConfig)}
+                          >
+                            {t('自动填入')}
+                          </Button>
+                          <Button
+                            size='small'
+                            type='tertiary'
+                            onClick={() => setClipboardConfig(null)}
+                          >
+                            {t('忽略')}
+                          </Button>
+                        </div>
+                      </div>
+                    }
+                  />
+                )}
+                {/* Core Configuration Card - Always Visible */}
+                <Card className='!rounded-2xl shadow-sm border-0'>
+                  {/* Header */}
+                  <div className='flex items-center mb-4'>
+                    <Avatar
+                      size='small'
+                      color='blue'
+                      className='mr-2 shadow-md'
+                    >
+                      <IconServer size={16} />
+                    </Avatar>
+                    <div>
+                      <Text className='text-lg font-medium'>
+                        {t('核心配置')}
+                      </Text>
+                      <div className='text-xs text-gray-600'>
+                        {t('创建渠道所需的基本信息')}
+                      </div>
                     </div>
+                  </div>
 
                     {isIonetChannel && (
                       <Banner
@@ -2548,34 +3235,10 @@ const EditChannelModal = (props) => {
                         }
                       />
                     )}
-                  </Card>
-                </div>
 
-                {/* API Configuration Card */}
-                {showApiConfigCard && (
-                  <div ref={(el) => (formSectionRefs.current.apiConfig = el)}>
-                    <Card className='!rounded-2xl shadow-sm border-0 mb-6'>
-                      {/* Header: API Config */}
-                      <div
-                        className='flex items-center mb-2'
-                        onClick={handleApiConfigSecretClick}
-                      >
-                        <Avatar
-                          size='small'
-                          color='green'
-                          className='mr-2 shadow-md'
-                        >
-                          <IconGlobe size={16} />
-                        </Avatar>
-                        <div>
-                          <Text className='text-lg font-medium'>
-                            {t('API 配置')}
-                          </Text>
-                          <div className='text-xs text-gray-600'>
-                            {t('API 地址和相关配置')}
-                          </div>
-                        </div>
-                      </div>
+                  {/* API Configuration Section */}
+                  {showApiConfigCard && (
+                    <div onClick={handleApiConfigSecretClick}>
 
                       {inputs.type === 40 && (
                         <Banner
@@ -2773,8 +3436,9 @@ const EditChannelModal = (props) => {
                                   'https://ark.ap-southeast.bytepluses.com',
                               },
                               {
-                                value: 'doubao-coding-plan',
-                                label: 'Doubao Coding Plan',
+                                value: DEPRECATED_DOUBAO_CODING_PLAN_BASE_URL,
+                                label: doubaoCodingPlanOptionLabel,
+                                disabled: !canKeepDeprecatedDoubaoCodingPlan,
                               },
                             ]}
                             defaultValue='https://ark.cn-beijing.volces.com'
@@ -2782,42 +3446,29 @@ const EditChannelModal = (props) => {
                           />
                         </div>
                       )}
-                    </Card>
-                  </div>
-                )}
-
-                {/* Model Configuration Card */}
-                <div ref={(el) => (formSectionRefs.current.modelConfig = el)}>
-                  <Card className='!rounded-2xl shadow-sm border-0 mb-6'>
-                    {/* Header: Model Config */}
-                    <div className='flex items-center mb-2'>
-                      <Avatar
-                        size='small'
-                        color='purple'
-                        className='mr-2 shadow-md'
-                      >
-                        <IconCode size={16} />
-                      </Avatar>
-                      <div>
-                        <Text className='text-lg font-medium'>
-                          {t('模型配置')}
-                        </Text>
-                        <div className='text-xs text-gray-600'>
-                          {t('模型选择和映射设置')}
-                        </div>
-                      </div>
                     </div>
+                  )}
 
-                    <Form.Select
+                  {/* Model Selection - Part of Core Config */}
+                  <Form.Select
                       field='models'
                       label={t('模型')}
                       placeholder={t('请选择该渠道所支持的模型')}
                       rules={[{ required: true, message: t('请选择模型') }]}
                       multiple
                       filter={selectFilter}
+                      allowCreate
                       autoClearSearchValue={false}
                       searchPosition='dropdown'
                       optionList={modelOptions}
+                      onSearch={(value) => setModelSearchValue(value)}
+                      innerBottomSlot={
+                        modelSearchHintText ? (
+                          <Text className='px-3 py-2 block text-xs !text-semi-color-text-2'>
+                            {modelSearchHintText}
+                          </Text>
+                        ) : null
+                      }
                       style={{ width: '100%' }}
                       onChange={(value) => handleInputChange('models', value)}
                       renderSelectedItem={(optionNode) => {
@@ -2848,7 +3499,7 @@ const EditChannelModal = (props) => {
                         };
                       }}
                       extraText={
-                        <Space wrap>
+                        <Space>
                           <Button
                             size='small'
                             type='primary'
@@ -2858,16 +3509,7 @@ const EditChannelModal = (props) => {
                           >
                             {t('填入相关模型')}
                           </Button>
-                          <Button
-                            size='small'
-                            type='secondary'
-                            onClick={() =>
-                              handleInputChange('models', fullModels)
-                            }
-                          >
-                            {t('填入所有模型')}
-                          </Button>
-                          {MODEL_FETCHABLE_TYPES.has(inputs.type) && (
+                          {MODEL_FETCHABLE_CHANNEL_TYPES.has(inputs.type) && (
                             <Button
                               size='small'
                               type='tertiary'
@@ -2876,674 +3518,267 @@ const EditChannelModal = (props) => {
                               {t('获取模型列表')}
                             </Button>
                           )}
-                          {inputs.type === 4 && isEdit && (
-                            <Button
-                              size='small'
-                              type='primary'
-                              theme='light'
-                              onClick={() => setOllamaModalVisible(true)}
-                            >
-                              {t('Ollama 模型管理')}
+                          <Dropdown
+                            trigger='click'
+                            position='bottomRight'
+                            menu={[
+                              { node: 'item', name: t('填入所有模型'), onClick: () => handleInputChange('models', fullModels) },
+                              ...(inputs.type === 4 && isEdit ? [{ node: 'item', name: t('Ollama 模型管理'), onClick: () => setOllamaModalVisible(true) }] : []),
+                              { node: 'divider' },
+                              { node: 'item', name: t('复制所有模型'), onClick: () => {
+                                if (inputs.models.length === 0) { showInfo(t('没有模型可以复制')); return; }
+                                try { copy(inputs.models.join(',')); showSuccess(t('模型列表已复制到剪贴板')); } catch (error) { showError(t('复制失败')); }
+                              }},
+                              { node: 'item', name: t('清除所有模型'), type: 'danger', onClick: () => handleInputChange('models', []) },
+                              ...((modelGroups && modelGroups.length > 0) ? [
+                                { node: 'divider' },
+                                ...modelGroups.map((group) => ({
+                                  node: 'item',
+                                  name: group.name,
+                                  onClick: () => {
+                                    let items = [];
+                                    try {
+                                      if (Array.isArray(group.items)) { items = group.items; }
+                                      else if (typeof group.items === 'string') {
+                                        const parsed = JSON.parse(group.items || '[]');
+                                        if (Array.isArray(parsed)) items = parsed;
+                                      }
+                                    } catch {}
+                                    const current = formApiRef.current?.getValue('models') || inputs.models || [];
+                                    const merged = Array.from(new Set([...current, ...items].map((m) => (m || '').trim()).filter(Boolean)));
+                                    handleInputChange('models', merged);
+                                  },
+                                })),
+                              ] : []),
+                            ]}
+                          >
+                            <Button size='small' type='tertiary'>
+                              {t('更多')} <IconChevronDown size={12} />
                             </Button>
-                          )}
-                          <Button
-                            size='small'
-                            type='warning'
-                            onClick={() => handleInputChange('models', [])}
-                          >
-                            {t('清除所有模型')}
-                          </Button>
-                          <Button
-                            size='small'
-                            type='tertiary'
-                            onClick={() => {
-                              if (inputs.models.length === 0) {
-                                showInfo(t('没有模型可以复制'));
-                                return;
-                              }
-                              try {
-                                copy(inputs.models.join(','));
-                                showSuccess(t('模型列表已复制到剪贴板'));
-                              } catch (error) {
-                                showError(t('复制失败'));
-                              }
-                            }}
-                          >
-                            {t('复制所有模型')}
-                          </Button>
-                          {modelGroups &&
-                            modelGroups.length > 0 &&
-                            modelGroups.map((group) => (
-                              <Button
-                                key={group.id}
-                                size='small'
-                                type='primary'
-                                onClick={() => {
-                                  let items = [];
-                                  try {
-                                    if (Array.isArray(group.items)) {
-                                      items = group.items;
-                                    } else if (
-                                      typeof group.items === 'string'
-                                    ) {
-                                      const parsed = JSON.parse(
-                                        group.items || '[]',
-                                      );
-                                      if (Array.isArray(parsed)) items = parsed;
-                                    }
-                                  } catch {}
-                                  const current =
-                                    formApiRef.current?.getValue('models') ||
-                                    inputs.models ||
-                                    [];
-                                  const merged = Array.from(
-                                    new Set(
-                                      [...current, ...items]
-                                        .map((m) => (m || '').trim())
-                                        .filter(Boolean),
-                                    ),
-                                  );
-                                  handleInputChange('models', merged);
-                                }}
-                              >
-                                {group.name}
-                              </Button>
-                            ))}
+                          </Dropdown>
                         </Space>
                       }
                     />
 
-                    <Form.Input
-                      field='custom_model'
-                      label={t('自定义模型名称')}
-                      placeholder={t('输入自定义模型名称')}
-                      onChange={(value) => setCustomModel(value.trim())}
-                      value={customModel}
-                      suffix={
-                        <Button
-                          size='small'
-                          type='primary'
-                          onClick={addCustomModels}
-                        >
-                          {t('填入')}
-                        </Button>
-                      }
-                    />
-
-                    <Form.Input
-                      field='test_model'
-                      label={t('默认测试模型')}
-                      placeholder={t('不填则为模型列表第一个')}
-                      onChange={(value) =>
-                        handleInputChange('test_model', value)
-                      }
-                      showClear
-                    />
-
-                    <JSONEditor
-                      key={`model_mapping-${isEdit ? channelId : 'new'}`}
-                      field='model_mapping'
-                      label={t('模型重定向')}
-                      placeholder={
-                        t(
-                          '此项可选，用于修改请求体中的模型名称，为一个 JSON 字符串，键为请求中模型名称，值为要替换的模型名称，例如：',
-                        ) +
-                        `\n${JSON.stringify(MODEL_MAPPING_EXAMPLE, null, 2)}`
-                      }
-                      value={inputs.model_mapping || ''}
-                      onChange={(value) =>
-                        handleInputChange('model_mapping', value)
-                      }
-                      template={MODEL_MAPPING_EXAMPLE}
-                      templateLabel={t('填入模板')}
-                      editorType='keyValue'
-                      formApi={formApiRef.current}
-                      renderStringValueSuffix={({ pairKey, value }) => {
-                        if (!MODEL_FETCHABLE_TYPES.has(inputs.type)) {
-                          return null;
-                        }
-                        const disabled = !String(pairKey ?? '').trim();
-                        return (
-                          <Tooltip content={t('选择模型')}>
-                            <Button
-                              type='tertiary'
-                              theme='borderless'
-                              size='small'
-                              icon={<IconSearch size={14} />}
-                              disabled={disabled}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openModelMappingValueModal({ pairKey, value });
-                              }}
-                            />
-                          </Tooltip>
-                        );
-                      }}
-                      extraText={t(
-                        '键为请求中的模型名称，值为要替换的模型名称',
-                      )}
-                    />
-                  </Card>
-                </div>
-
-                {/* Advanced Settings Card */}
-                <div
-                  ref={(el) => (formSectionRefs.current.advancedSettings = el)}
-                >
-                  <Card className='!rounded-2xl shadow-sm border-0 mb-6'>
-                    {/* Header: Advanced Settings */}
-                    <div className='flex items-center mb-2'>
-                      <Avatar
+                  {/* Custom Model Name - Core Config */}
+                  <Form.Input
+                    field='custom_model'
+                    label={t('自定义模型名称')}
+                    placeholder={t('输入自定义模型名称')}
+                    onChange={(value) => setCustomModel(value.trim())}
+                    value={customModel}
+                    suffix={
+                      <Button
                         size='small'
-                        color='orange'
-                        className='mr-2 shadow-md'
+                        type='primary'
+                        onClick={addCustomModels}
                       >
+                        {t('填入')}
+                      </Button>
+                    }
+                  />
+
+                  {/* Groups - Core Config */}
+                  <Form.Select
+                    field='groups'
+                    label={t('分组')}
+                    placeholder={t('请选择可以使用该渠道的分组')}
+                    multiple
+                    allowAdditions
+                    additionLabel={t(
+                      '请在系统设置页面编辑分组倍率以添加新的分组：',
+                    )}
+                    optionList={groupOptions}
+                    style={{ width: '100%' }}
+                    position='top'
+                    onChange={(value) => handleInputChange('groups', value)}
+                  />
+
+                  {/* Model Mapping - Core Config */}
+                  <JSONEditor
+                    key={`model_mapping-${isEdit ? channelId : 'new'}`}
+                    field='model_mapping'
+                    label={t('模型重定向')}
+                    placeholder={
+                      t(
+                        '此项可选，用于修改请求体中的模型名称，为一个 JSON 字符串，键为请求中模型名称，值为要替换的模型名称，例如：',
+                      ) +
+                      `\n${JSON.stringify(MODEL_MAPPING_EXAMPLE, null, 2)}`
+                    }
+                    value={inputs.model_mapping || ''}
+                    onChange={(value) =>
+                      handleInputChange('model_mapping', value)
+                    }
+                    template={MODEL_MAPPING_EXAMPLE}
+                    templateLabel={t('填入模板')}
+                    editorType='keyValue'
+                    formApi={formApiRef.current}
+                    renderStringValueSuffix={({ pairKey, value }) => {
+                      if (!MODEL_FETCHABLE_CHANNEL_TYPES.has(inputs.type)) {
+                        return null;
+                      }
+                      const disabled = !String(pairKey ?? '').trim();
+                      return (
+                        <Tooltip content={t('选择模型')}>
+                          <Button
+                            type='tertiary'
+                            theme='borderless'
+                            size='small'
+                            icon={<IconSearch size={14} />}
+                            disabled={disabled}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openModelMappingValueModal({ pairKey, value });
+                            }}
+                          />
+                        </Tooltip>
+                      );
+                    }}
+                    extraText={t(
+                      '键为请求中的模型名称，值为要替换的模型名称',
+                    )}
+                  />
+
+                  {/* Auto Ban - Core Config */}
+                  <Form.Switch
+                    field='auto_ban'
+                    label={t('是否自动禁用')}
+                    checkedText={t('开')}
+                    uncheckedText={t('关')}
+                    onChange={(value) => setAutoBan(value)}
+                    extraText={t(
+                      '仅当自动禁用开启时有效，关闭后不会自动禁用该渠道',
+                    )}
+                    initValue={autoBan}
+                  />
+
+                  {/* Test Model - Core Config */}
+                  <Form.Input
+                    field='test_model'
+                    label={t('默认测试模型')}
+                    placeholder={t('不填则为模型列表第一个')}
+                    onChange={(value) =>
+                      handleInputChange('test_model', value)
+                    }
+                    showClear
+                  />
+                </Card>
+
+                {/* Advanced Settings Toggle / Collapse */}
+                {isMobile ? (
+                <Collapse
+                  activeKey={advancedSettingsOpen ? ['advanced'] : []}
+                  onChange={(keys) => toggleAdvancedSettings(keys.includes('advanced'))}
+                >
+                  <Collapse.Panel
+                    header={
+                      <div className='flex items-center gap-2'>
                         <IconSetting size={16} />
-                      </Avatar>
-                      <div>
-                        <Text className='text-lg font-medium'>
-                          {t('高级设置')}
-                        </Text>
-                        <div className='text-xs text-gray-600'>
-                          {t('渠道的高级配置选项')}
-                        </div>
+                        <Text className='font-medium'>{t('高级设置')}</Text>
                       </div>
+                    }
+                    itemKey='advanced'
+                  >
+                    {advancedSettingsContent}
+                  </Collapse.Panel>
+                </Collapse>
+                ) : (
+                  /* Desktop: toggle button to open side panel */
+                  <div
+                    className='flex items-center justify-between p-3 rounded-xl cursor-pointer transition-colors hover:bg-gray-50'
+                    style={{
+                      backgroundColor: advancedSettingsOpen ? 'var(--semi-color-primary-light-default)' : 'var(--semi-color-fill-0)',
+                      border: '1px solid var(--semi-color-fill-2)',
+                    }}
+                    onClick={() => toggleAdvancedSettings(!advancedSettingsOpen)}
+                  >
+                    <div className='flex items-center gap-2'>
+                      <IconSetting size={16} />
+                      <Text className='font-medium'>{t('高级设置')}</Text>
                     </div>
-
-                    <Form.Select
-                      field='groups'
-                      label={t('分组')}
-                      placeholder={t('请选择可以使用该渠道的分组')}
-                      multiple
-                      allowAdditions
-                      additionLabel={t(
-                        '请在系统设置页面编辑分组倍率以添加新的分组：',
-                      )}
-                      optionList={groupOptions}
-                      style={{ width: '100%' }}
-                      onChange={(value) => handleInputChange('groups', value)}
-                    />
-
-                    <Form.Input
-                      field='tag'
-                      label={t('渠道标签')}
-                      placeholder={t('渠道标签')}
-                      showClear
-                      onChange={(value) => handleInputChange('tag', value)}
-                    />
-                    <Form.TextArea
-                      field='remark'
-                      label={t('备注')}
-                      placeholder={t('请输入备注（仅管理员可见）')}
-                      maxLength={255}
-                      showClear
-                      onChange={(value) => handleInputChange('remark', value)}
-                    />
-
-                    <Row gutter={12}>
-                      <Col span={12}>
-                        <Form.InputNumber
-                          field='priority'
-                          label={t('渠道优先级')}
-                          placeholder={t('渠道优先级')}
-                          min={0}
-                          onNumberChange={(value) =>
-                            handleInputChange('priority', value)
-                          }
-                          style={{ width: '100%' }}
-                        />
-                      </Col>
-                      <Col span={12}>
-                        <Form.InputNumber
-                          field='weight'
-                          label={t('渠道权重')}
-                          placeholder={t('渠道权重')}
-                          min={0}
-                          onNumberChange={(value) =>
-                            handleInputChange('weight', value)
-                          }
-                          style={{ width: '100%' }}
-                        />
-                      </Col>
-                    </Row>
-
-                    <Form.Switch
-                      field='auto_ban'
-                      label={t('是否自动禁用')}
-                      checkedText={t('开')}
-                      uncheckedText={t('关')}
-                      onChange={(value) => setAutoBan(value)}
-                      extraText={t(
-                        '仅当自动禁用开启时有效，关闭后不会自动禁用该渠道',
-                      )}
-                      initValue={autoBan}
-                    />
-
-                    <Form.TextArea
-                      field='param_override'
-                      label={t('参数覆盖')}
-                      placeholder={
-                        t(
-                          '此项可选，用于覆盖请求参数。不支持覆盖 stream 参数',
-                        ) +
-                        '\n' +
-                        t('旧格式（直接覆盖）：') +
-                        '\n{\n  "temperature": 0,\n  "max_tokens": 1000\n}' +
-                        '\n\n' +
-                        t('新格式（支持条件判断与json自定义）：') +
-                        '\n{\n  "operations": [\n    {\n      "path": "temperature",\n      "mode": "set",\n      "value": 0.7,\n      "conditions": [\n        {\n          "path": "model",\n          "mode": "prefix",\n          "value": "gpt"\n        }\n      ]\n    }\n  ]\n}'
-                      }
-                      autosize
-                      onChange={(value) =>
-                        handleInputChange('param_override', value)
-                      }
-                      extraText={
-                        <div className='flex gap-2 flex-wrap'>
-                          <Text
-                            className='!text-semi-color-primary cursor-pointer'
-                            onClick={() =>
-                              handleInputChange(
-                                'param_override',
-                                JSON.stringify({ temperature: 0 }, null, 2),
-                              )
-                            }
-                          >
-                            {t('旧格式模板')}
-                          </Text>
-                          <Text
-                            className='!text-semi-color-primary cursor-pointer'
-                            onClick={() =>
-                              handleInputChange(
-                                'param_override',
-                                JSON.stringify(
-                                  {
-                                    operations: [
-                                      {
-                                        path: 'temperature',
-                                        mode: 'set',
-                                        value: 0.7,
-                                        conditions: [
-                                          {
-                                            path: 'model',
-                                            mode: 'prefix',
-                                            value: 'gpt',
-                                          },
-                                        ],
-                                        logic: 'AND',
-                                      },
-                                    ],
-                                  },
-                                  null,
-                                  2,
-                                ),
-                              )
-                            }
-                          >
-                            {t('新格式模板')}
-                          </Text>
-                          <Text
-                            className='!text-semi-color-primary cursor-pointer'
-                            onClick={() => formatJsonField('param_override')}
-                          >
-                            {t('格式化')}
-                          </Text>
-                        </div>
-                      }
-                      showClear
-                    />
-
-                    <Form.TextArea
-                      field='header_override'
-                      label={t('请求头覆盖')}
-                      placeholder={
-                        t('此项可选，用于覆盖请求头参数') +
-                        '\n' +
-                        t('格式示例：') +
-                        '\n{\n  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0",\n  "Authorization": "Bearer {api_key}"\n}'
-                      }
-                      autosize
-                      onChange={(value) =>
-                        handleInputChange('header_override', value)
-                      }
-                      extraText={
-                        <div className='flex flex-col gap-1'>
-                          <div className='flex gap-2 flex-wrap items-center'>
-                            <Text
-                              className='!text-semi-color-primary cursor-pointer'
-                              onClick={() =>
-                                handleInputChange(
-                                  'header_override',
-                                  JSON.stringify(
-                                    {
-                                      '*': true,
-                                      're:^X-Trace-.*$': true,
-                                      'X-Foo': '{client_header:X-Foo}',
-                                      Authorization: 'Bearer {api_key}',
-                                      'User-Agent':
-                                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0',
-                                    },
-                                    null,
-                                    2,
-                                  ),
-                                )
-                              }
-                            >
-                              {t('填入模板')}
-                            </Text>
-                            <Text
-                              className='!text-semi-color-primary cursor-pointer'
-                              onClick={() =>
-                                handleInputChange(
-                                  'header_override',
-                                  JSON.stringify(
-                                    {
-                                      '*': true,
-                                    },
-                                    null,
-                                    2,
-                                  ),
-                                )
-                              }
-                            >
-                              {t('填入透传模版')}
-                            </Text>
-                            <Text
-                              className='!text-semi-color-primary cursor-pointer'
-                              onClick={() => formatJsonField('header_override')}
-                            >
-                              {t('格式化')}
-                            </Text>
-                          </div>
-                          <div>
-                            <Text type='tertiary' size='small'>
-                              {t('支持变量：')}
-                            </Text>
-                            <div className='text-xs text-tertiary ml-2'>
-                              <div>
-                                {t('渠道密钥')}: {'{api_key}'}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      }
-                      showClear
-                    />
-
-                    <JSONEditor
-                      key={`status_code_mapping-${isEdit ? channelId : 'new'}`}
-                      field='status_code_mapping'
-                      label={t('状态码复写')}
-                      placeholder={
-                        t(
-                          '此项可选，用于复写返回的状态码，仅影响本地判断，不修改返回到上游的状态码，比如将claude渠道的400错误复写为500（用于重试），请勿滥用该功能，例如：',
-                        ) +
-                        '\n' +
-                        JSON.stringify(STATUS_CODE_MAPPING_EXAMPLE, null, 2)
-                      }
-                      value={inputs.status_code_mapping || ''}
-                      onChange={(value) =>
-                        handleInputChange('status_code_mapping', value)
-                      }
-                      template={STATUS_CODE_MAPPING_EXAMPLE}
-                      templateLabel={t('填入模板')}
-                      editorType='keyValue'
-                      formApi={formApiRef.current}
-                      extraText={t(
-                        '键为原状态码，值为要复写的状态码，仅影响本地判断',
-                      )}
-                    />
-
-                    {/* 字段透传控制 - OpenAI 渠道 */}
-                    {inputs.type === 1 && (
-                      <>
-                        <div className='mt-4 mb-2 text-sm font-medium text-gray-700'>
-                          {t('字段透传控制')}
-                        </div>
-
-                        <Form.Switch
-                          field='allow_service_tier'
-                          label={t('允许 service_tier 透传')}
-                          checkedText={t('开')}
-                          uncheckedText={t('关')}
-                          onChange={(value) =>
-                            handleChannelOtherSettingsChange(
-                              'allow_service_tier',
-                              value,
-                            )
-                          }
-                          extraText={t(
-                            'service_tier 字段用于指定服务层级，允许透传可能导致实际计费高于预期。默认关闭以避免额外费用',
-                          )}
-                        />
-
-                        <Form.Switch
-                          field='disable_store'
-                          label={t('禁用 store 透传')}
-                          checkedText={t('开')}
-                          uncheckedText={t('关')}
-                          onChange={(value) =>
-                            handleChannelOtherSettingsChange(
-                              'disable_store',
-                              value,
-                            )
-                          }
-                          extraText={t(
-                            'store 字段用于授权 OpenAI 存储请求数据以评估和优化产品。默认关闭，开启后可能导致 Codex 无法正常使用',
-                          )}
-                        />
-
-                        <Form.Switch
-                          field='allow_safety_identifier'
-                          label={t('允许 safety_identifier 透传')}
-                          checkedText={t('开')}
-                          uncheckedText={t('关')}
-                          onChange={(value) =>
-                            handleChannelOtherSettingsChange(
-                              'allow_safety_identifier',
-                              value,
-                            )
-                          }
-                          extraText={t(
-                            'safety_identifier 字段用于帮助 OpenAI 识别可能违反使用政策的应用程序用户。默认关闭以保护用户隐私',
-                          )}
-                        />
-
-                        <Form.Switch
-                          field='allow_include_obfuscation'
-                          label={t(
-                            '允许 stream_options.include_obfuscation 透传',
-                          )}
-                          checkedText={t('开')}
-                          uncheckedText={t('关')}
-                          onChange={(value) =>
-                            handleChannelOtherSettingsChange(
-                              'allow_include_obfuscation',
-                              value,
-                            )
-                          }
-                          extraText={t(
-                            'include_obfuscation 用于控制 Responses 流混淆字段。默认关闭以避免客户端关闭该安全保护',
-                          )}
-                        />
-                      </>
-                    )}
-
-                    {/* 字段透传控制 - Claude 渠道 */}
-                    {inputs.type === 14 && (
-                      <>
-                        <div className='mt-4 mb-2 text-sm font-medium text-gray-700'>
-                          {t('字段透传控制')}
-                        </div>
-
-                        <Form.Switch
-                          field='allow_service_tier'
-                          label={t('允许 service_tier 透传')}
-                          checkedText={t('开')}
-                          uncheckedText={t('关')}
-                          onChange={(value) =>
-                            handleChannelOtherSettingsChange(
-                              'allow_service_tier',
-                              value,
-                            )
-                          }
-                          extraText={t(
-                            'service_tier 字段用于指定服务层级，允许透传可能导致实际计费高于预期。默认关闭以避免额外费用',
-                          )}
-                        />
-
-                        <Form.Switch
-                          field='allow_inference_geo'
-                          label={t('允许 inference_geo 透传')}
-                          checkedText={t('开')}
-                          uncheckedText={t('关')}
-                          onChange={(value) =>
-                            handleChannelOtherSettingsChange(
-                              'allow_inference_geo',
-                              value,
-                            )
-                          }
-                          extraText={t(
-                            'inference_geo 字段用于控制 Claude 数据驻留推理区域。默认关闭以避免未经授权透传地域信息',
-                          )}
-                        />
-                      </>
-                    )}
-                  </Card>
-                </div>
-
-                {/* Channel Extra Settings Card */}
-                <div
-                  ref={(el) =>
-                    (formSectionRefs.current.channelExtraSettings = el)
-                  }
-                >
-                  <Card className='!rounded-2xl shadow-sm border-0 mb-6'>
-                    {/* Header: Channel Extra Settings */}
-                    <div className='flex items-center mb-2'>
-                      <Avatar
-                        size='small'
-                        color='violet'
-                        className='mr-2 shadow-md'
-                      >
-                        <IconBolt size={16} />
-                      </Avatar>
-                      <div>
-                        <Text className='text-lg font-medium'>
-                          {t('渠道额外设置')}
-                        </Text>
-                      </div>
+                    <div className='flex items-center gap-1 text-sm' style={{ color: 'var(--semi-color-primary)' }}>
+                      <Text size='small' style={{ color: 'var(--semi-color-primary)' }}>
+                        {advancedSettingsOpen ? t('收起') : isEdit ? t('向左展开') : t('向右展开')}
+                      </Text>
+                      <IconChevronDown
+                        size={14}
+                        style={{
+                          transform: advancedSettingsOpen
+                            ? 'rotate(180deg)'
+                            : isEdit ? 'rotate(90deg)' : 'rotate(-90deg)',
+                          transition: 'transform 0.2s',
+                        }}
+                      />
                     </div>
-
-                    {inputs.type === 14 && (
-                      <Form.Switch
-                        field='claude_beta_query'
-                        label={t('Claude 强制 beta=true')}
-                        checkedText={t('开')}
-                        uncheckedText={t('关')}
-                        onChange={(value) =>
-                          handleChannelOtherSettingsChange(
-                            'claude_beta_query',
-                            value,
-                          )
-                        }
-                        extraText={t(
-                          '开启后，该渠道请求 Claude 时将强制追加 ?beta=true（无需客户端手动传参）',
-                        )}
-                      />
-                    )}
-
-                    {inputs.type === 1 && (
-                      <Form.Switch
-                        field='force_format'
-                        label={t('强制格式化')}
-                        checkedText={t('开')}
-                        uncheckedText={t('关')}
-                        onChange={(value) =>
-                          handleChannelSettingsChange('force_format', value)
-                        }
-                        extraText={t(
-                          '强制将响应格式化为 OpenAI 标准格式（只适用于OpenAI渠道类型）',
-                        )}
-                      />
-                    )}
-
-                    <Form.Switch
-                      field='thinking_to_content'
-                      label={t('思考内容转换')}
-                      checkedText={t('开')}
-                      uncheckedText={t('关')}
-                      onChange={(value) =>
-                        handleChannelSettingsChange(
-                          'thinking_to_content',
-                          value,
-                        )
-                      }
-                      extraText={t(
-                        '将 reasoning_content 转换为 <think> 标签拼接到内容中',
-                      )}
-                    />
-
-                    <Form.Switch
-                      field='pass_through_body_enabled'
-                      label={t('透传请求体')}
-                      checkedText={t('开')}
-                      uncheckedText={t('关')}
-                      onChange={(value) =>
-                        handleChannelSettingsChange(
-                          'pass_through_body_enabled',
-                          value,
-                        )
-                      }
-                      extraText={t('启用请求体透传功能')}
-                    />
-
-                    <Form.Input
-                      field='proxy'
-                      label={t('代理地址')}
-                      placeholder={t('例如: socks5://user:pass@host:port')}
-                      onChange={(value) =>
-                        handleChannelSettingsChange('proxy', value)
-                      }
-                      showClear
-                      extraText={t('用于配置网络代理，支持 socks5 协议')}
-                    />
-
-                    <Form.TextArea
-                      field='system_prompt'
-                      label={t('系统提示词')}
-                      placeholder={t(
-                        '输入系统提示词，用户的系统提示词将优先于此设置',
-                      )}
-                      onChange={(value) =>
-                        handleChannelSettingsChange('system_prompt', value)
-                      }
-                      autosize
-                      showClear
-                      extraText={t(
-                        '用户优先：如果用户在请求中指定了系统提示词，将优先使用用户的设置',
-                      )}
-                    />
-                    <Form.Switch
-                      field='system_prompt_override'
-                      label={t('系统提示词拼接')}
-                      checkedText={t('开')}
-                      uncheckedText={t('关')}
-                      onChange={(value) =>
-                        handleChannelSettingsChange(
-                          'system_prompt_override',
-                          value,
-                        )
-                      }
-                      extraText={t(
-                        '如果用户请求中包含系统提示词，则使用此设置拼接到用户的系统提示词前面',
-                      )}
-                    />
-                  </Card>
-                </div>
+                  </div>
+                )}
               </div>
             </Spin>
-          )}
+
+            {/* Desktop: Advanced Settings Side Panel - rendered inside Form tree */}
+            {!isMobile && advancedSettingsOpen && (
+              <div
+                className='fixed top-0 h-full overflow-y-auto z-[999] semi-sidesheet-inner'
+                style={{
+                  width: 600,
+                  [isEdit ? 'right' : 'left']: 600,
+                  backgroundColor: 'var(--semi-color-bg-0)',
+                  borderLeft: isEdit ? 'none' : '1px solid var(--semi-color-border)',
+                  borderRight: isEdit ? '1px solid var(--semi-color-border)' : 'none',
+                  animation: `slideIn${isEdit ? 'Left' : 'Right'} 0.3s ease-out`,
+                }}
+              >
+                <div className='semi-sidesheet-header'>
+                  <div className='semi-sidesheet-title'>
+                    <Space>
+                      <Tag color='cyan' shape='circle'>
+                        {t('高级')}
+                      </Tag>
+                      <Title heading={4} className='m-0'>
+                        {t('高级设置')}
+                      </Title>
+                    </Space>
+                  </div>
+                  <Button
+                    className='semi-sidesheet-close'
+                    type='tertiary'
+                    theme='borderless'
+                    icon={<IconClose />}
+                    size='small'
+                    onClick={() => setAdvancedSettingsOpen(false)}
+                  />
+                </div>
+                <div className='semi-sidesheet-body' style={{ padding: 0 }}>
+                  <div className='p-2 space-y-3'>
+                    <Card className='!rounded-2xl shadow-sm border-0'>
+                      <div className='flex items-center mb-4'>
+                        <Avatar
+                          size='small'
+                          color='orange'
+                          className='mr-2 shadow-md'
+                        >
+                          <IconSetting size={16} />
+                        </Avatar>
+                        <div>
+                          <Text className='text-lg font-medium'>
+                            {t('高级设置')}
+                          </Text>
+                          <div className='text-xs text-gray-600'>
+                            {t('渠道的高级配置选项')}
+                          </div>
+                        </div>
+                      </div>
+                      {advancedSettingsContent}
+                    </Card>
+                  </div>
+                </div>
+              </div>
+            )}
+            </>
+          );
+          }}
         </Form>
+
         <ImagePreview
           src={modalImageUrl}
           visible={isModalOpenurl}
@@ -3610,11 +3845,22 @@ const EditChannelModal = (props) => {
         />
       </Modal>
 
+      <ParamOverrideEditorModal
+        visible={paramOverrideEditorVisible}
+        value={inputs.param_override || ''}
+        onCancel={() => setParamOverrideEditorVisible(false)}
+        onSave={(nextValue) => {
+          handleInputChange('param_override', nextValue);
+          setParamOverrideEditorVisible(false);
+        }}
+      />
+
       <ModelSelectModal
         visible={modelModalVisible}
         models={fetchedModels}
         selected={inputs.models}
         redirectModels={redirectModelList}
+        redirectSourceModels={redirectModelKeyList}
         onConfirm={(selectedModels) => {
           handleInputChange('models', selectedModels);
           showSuccess(t('模型列表已更新'));

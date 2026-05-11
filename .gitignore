@@ -1,6 +1,7 @@
 .idea
 .vscode
 .zed
+.history
 upload
 *.exe
 *.db
@@ -20,6 +21,7 @@ tiktoken_cache
 .cache
 web/bun.lock
 plans
+.claude
 
 electron/node_modules
 electron/dist
@@ -27,4 +29,6 @@ data/
 .gomodcache/
 .gocache-temp
 .gopath
-.magi/
+.test
+token_estimator_test.go
+skills-lock.json

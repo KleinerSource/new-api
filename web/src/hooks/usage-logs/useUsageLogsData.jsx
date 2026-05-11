@@ -36,9 +36,12 @@ import {
   renderAudioModelPrice,
   renderClaudeModelPrice,
   renderModelPrice,
+  renderTieredModelPrice,
+  renderTaskBillingProcess,
 } from '../../helpers';
 import { ITEMS_PER_PAGE } from '../../constants';
 import { useTableCompactMode } from '../common/useTableCompactMode';
+import ParamOverrideEntry from '../../components/table/usage-logs/components/ParamOverrideEntry';
 
 export const useLogsData = () => {
   const { t } = useTranslation();
@@ -78,6 +81,9 @@ export const useLogsData = () => {
   const STORAGE_KEY = isAdminUser
     ? 'logs-table-columns-admin'
     : 'logs-table-columns-user';
+  const BILLING_DISPLAY_MODE_STORAGE_KEY = isAdminUser
+    ? 'logs-billing-display-mode-admin'
+    : 'logs-billing-display-mode-user';
 
   // Statistics state
   const [stat, setStat] = useState({
@@ -102,50 +108,6 @@ export const useLogsData = () => {
     logType: '0',
   };
 
-  // Column visibility state
-  const [visibleColumns, setVisibleColumns] = useState({});
-  const [showColumnSelector, setShowColumnSelector] = useState(false);
-
-  // Compact mode
-  const [compactMode, setCompactMode] = useTableCompactMode('logs');
-
-  // User info modal state
-  const [showUserInfo, setShowUserInfoModal] = useState(false);
-  const [userInfoData, setUserInfoData] = useState(null);
-
-  // Channel affinity usage cache stats modal state (admin only)
-  const [
-    showChannelAffinityUsageCacheModal,
-    setShowChannelAffinityUsageCacheModal,
-  ] = useState(false);
-  const [channelAffinityUsageCacheTarget, setChannelAffinityUsageCacheTarget] =
-    useState(null);
-
-  // Load saved column preferences from localStorage
-  useEffect(() => {
-    const savedColumns = localStorage.getItem(STORAGE_KEY);
-    if (savedColumns) {
-      try {
-        const parsed = JSON.parse(savedColumns);
-        const defaults = getDefaultColumnVisibility();
-        const merged = { ...defaults, ...parsed };
-
-        // For non-admin users, force-hide admin-only columns (does not touch admin settings)
-        if (!isAdminUser) {
-          merged[COLUMN_KEYS.CHANNEL] = false;
-          merged[COLUMN_KEYS.USERNAME] = false;
-          merged[COLUMN_KEYS.RETRY] = false;
-        }
-        setVisibleColumns(merged);
-      } catch (e) {
-        console.error('Failed to parse saved column preferences', e);
-        initDefaultColumns();
-      }
-    } else {
-      initDefaultColumns();
-    }
-  }, []);
-
   // Get default column visibility based on user role
   const getDefaultColumnVisibility = () => {
     return {
@@ -165,6 +127,65 @@ export const useLogsData = () => {
       [COLUMN_KEYS.DETAILS]: true,
     };
   };
+
+  const getInitialVisibleColumns = () => {
+    const defaults = getDefaultColumnVisibility();
+    const savedColumns = localStorage.getItem(STORAGE_KEY);
+
+    if (!savedColumns) {
+      return defaults;
+    }
+
+    try {
+      const parsed = JSON.parse(savedColumns);
+      const merged = { ...defaults, ...parsed };
+
+      if (!isAdminUser) {
+        merged[COLUMN_KEYS.CHANNEL] = false;
+        merged[COLUMN_KEYS.USERNAME] = false;
+        merged[COLUMN_KEYS.RETRY] = false;
+      }
+
+      return merged;
+    } catch (e) {
+      console.error('Failed to parse saved column preferences', e);
+      return defaults;
+    }
+  };
+
+  const getInitialBillingDisplayMode = () => {
+    const savedMode = localStorage.getItem(BILLING_DISPLAY_MODE_STORAGE_KEY);
+    if (savedMode === 'price' || savedMode === 'ratio') {
+      return savedMode;
+    }
+    return localStorage.getItem('quota_display_type') === 'TOKENS'
+      ? 'ratio'
+      : 'price';
+  };
+
+  // Column visibility state
+  const [visibleColumns, setVisibleColumns] = useState(getInitialVisibleColumns);
+  const [showColumnSelector, setShowColumnSelector] = useState(false);
+  const [billingDisplayMode, setBillingDisplayMode] = useState(
+    getInitialBillingDisplayMode,
+  );
+
+  // Compact mode
+  const [compactMode, setCompactMode] = useTableCompactMode('logs');
+
+  // User info modal state
+  const [showUserInfo, setShowUserInfoModal] = useState(false);
+  const [userInfoData, setUserInfoData] = useState(null);
+
+  // Channel affinity usage cache stats modal state (admin only)
+  const [
+    showChannelAffinityUsageCacheModal,
+    setShowChannelAffinityUsageCacheModal,
+  ] = useState(false);
+  const [channelAffinityUsageCacheTarget, setChannelAffinityUsageCacheTarget] =
+    useState(null);
+  const [showParamOverrideModal, setShowParamOverrideModal] = useState(false);
+  const [paramOverrideTarget, setParamOverrideTarget] = useState(null);
 
   // Initialize default column visibility
   const initDefaultColumns = () => {
@@ -206,6 +227,10 @@ export const useLogsData = () => {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(visibleColumns));
     }
   }, [visibleColumns]);
+
+  useEffect(() => {
+    localStorage.setItem(BILLING_DISPLAY_MODE_STORAGE_KEY, billingDisplayMode);
+  }, [BILLING_DISPLAY_MODE_STORAGE_KEY, billingDisplayMode]);
 
   // 获取表单值的辅助函数，确保所有值都是字符串
   const getFormValues = () => {
@@ -325,6 +350,20 @@ export const useLogsData = () => {
     setShowChannelAffinityUsageCacheModal(true);
   };
 
+  const openParamOverrideModal = (log, other) => {
+    const lines = Array.isArray(other?.po) ? other.po.filter(Boolean) : [];
+    if (lines.length === 0) {
+      return;
+    }
+    setParamOverrideTarget({
+      lines,
+      modelName: log?.model_name || '',
+      requestId: log?.request_id || '',
+      requestPath: other?.request_path || '',
+    });
+    setShowParamOverrideModal(true);
+  };
+
   // Format logs data
   const setLogsFormat = (logs) => {
     const requestConversionDisplayValue = (conversionChain) => {
@@ -387,41 +426,14 @@ export const useLogsData = () => {
         });
       }
       if (logs[i].type === 2) {
-        expandDataLocal.push({
-          key: t('日志详情'),
-          value: other?.claude
-            ? renderClaudeLogContent(
-                other?.model_ratio,
-                other.completion_ratio,
-                other.model_price,
-                other.group_ratio,
-                other?.user_group_ratio,
-                other.cache_ratio || 1.0,
-                other.cache_creation_ratio || 1.0,
-                other.cache_creation_tokens_5m || 0,
-                other.cache_creation_ratio_5m ||
-                  other.cache_creation_ratio ||
-                  1.0,
-                other.cache_creation_tokens_1h || 0,
-                other.cache_creation_ratio_1h ||
-                  other.cache_creation_ratio ||
-                  1.0,
-              )
-            : renderLogContent(
-                other?.model_ratio,
-                other.completion_ratio,
-                other.model_price,
-                other.group_ratio,
-                other?.user_group_ratio,
-                other.cache_ratio || 1.0,
-                false,
-                1.0,
-                other.web_search || false,
-                other.web_search_call_count || 0,
-                other.file_search || false,
-                other.file_search_call_count || 0,
-              ),
-        });
+        if (other?.billing_mode !== 'tiered_expr') {
+          expandDataLocal.push({
+            key: t('日志详情'),
+            value: other?.claude
+              ? renderClaudeLogContent({ ...other, displayMode: billingDisplayMode })
+              : renderLogContent({ ...other, displayMode: billingDisplayMode }),
+          });
+        }
         if (logs[i]?.content) {
           expandDataLocal.push({
             key: t('其他详情'),
@@ -457,71 +469,22 @@ export const useLogsData = () => {
           Boolean(other?.violation_fee_marker);
 
         let content = '';
-        if (!isViolationFeeLog) {
-          if (other?.ws || other?.audio) {
-            content = renderAudioModelPrice(
-              other?.text_input,
-              other?.text_output,
-              other?.model_ratio,
-              other?.model_price,
-              other?.completion_ratio,
-              other?.audio_input,
-              other?.audio_output,
-              other?.audio_ratio,
-              other?.audio_completion_ratio,
-              other?.group_ratio,
-              other?.user_group_ratio,
-              other?.cache_tokens || 0,
-              other?.cache_ratio || 1.0,
-            );
+        if (!isViolationFeeLog && other?.billing_mode !== 'tiered_expr') {
+          const logOpts = {
+            ...other,
+            prompt_tokens: logs[i].prompt_tokens,
+            completion_tokens: logs[i].completion_tokens,
+            displayMode: billingDisplayMode,
+          };
+          const isTaskLog = other?.is_task === true || other?.task_id != null;
+          if (isTaskLog && other?.model_price === -1) {
+            content = renderTaskBillingProcess(other, logs[i].content);
+          } else if (other?.ws || other?.audio) {
+            content = renderAudioModelPrice(logOpts);
           } else if (other?.claude) {
-            content = renderClaudeModelPrice(
-              logs[i].prompt_tokens,
-              logs[i].completion_tokens,
-              other.model_ratio,
-              other.model_price,
-              other.completion_ratio,
-              other.group_ratio,
-              other?.user_group_ratio,
-              other.cache_tokens || 0,
-              other.cache_ratio || 1.0,
-              other.cache_creation_tokens || 0,
-              other.cache_creation_ratio || 1.0,
-              other.cache_creation_tokens_5m || 0,
-              other.cache_creation_ratio_5m ||
-                other.cache_creation_ratio ||
-                1.0,
-              other.cache_creation_tokens_1h || 0,
-              other.cache_creation_ratio_1h ||
-                other.cache_creation_ratio ||
-                1.0,
-            );
+            content = renderClaudeModelPrice(logOpts);
           } else {
-            content = renderModelPrice(
-              logs[i].prompt_tokens,
-              logs[i].completion_tokens,
-              other?.model_ratio,
-              other?.model_price,
-              other?.completion_ratio,
-              other?.group_ratio,
-              other?.user_group_ratio,
-              other?.cache_tokens || 0,
-              other?.cache_ratio || 1.0,
-              other?.image || false,
-              other?.image_ratio || 0,
-              other?.image_output || 0,
-              other?.web_search || false,
-              other?.web_search_call_count || 0,
-              other?.web_search_price || 0,
-              other?.file_search || false,
-              other?.file_search_call_count || 0,
-              other?.file_search_price || 0,
-              other?.audio_input_seperate_price || false,
-              other?.audio_input_token_count || 0,
-              other?.audio_input_price || 0,
-              other?.image_generation_call || false,
-              other?.image_generation_call_price || 0,
-            );
+            content = renderModelPrice(logOpts);
           }
           expandDataLocal.push({
             key: t('计费过程'),
@@ -532,6 +495,17 @@ export const useLogsData = () => {
           expandDataLocal.push({
             key: t('Reasoning Effort'),
             value: other.reasoning_effort,
+          });
+        }
+        if (other?.billing_mode === 'tiered_expr' && other?.expr_b64) {
+          expandDataLocal.push({
+            key: t('计费过程'),
+            value: renderTieredModelPrice({
+              ...other,
+              prompt_tokens: logs[i].prompt_tokens,
+              completion_tokens: logs[i].completion_tokens,
+              displayMode: billingDisplayMode,
+            }),
           });
         }
       }
@@ -557,6 +531,47 @@ export const useLogsData = () => {
         expandDataLocal.push({
           key: t('请求路径'),
           value: other.request_path,
+        });
+      }
+      if (isAdminUser && other?.stream_status) {
+        const ss = other.stream_status;
+        const isOk = ss.status === 'ok';
+        const statusLabel = isOk ? '✓ ' + t('正常') : '✗ ' + t('异常');
+        let streamValue = statusLabel + ' (' + (ss.end_reason || 'unknown') + ')';
+        if (ss.error_count > 0) {
+          streamValue += ` [${t('软错误')}: ${ss.error_count}]`;
+        }
+        if (ss.end_error) {
+          streamValue += ` - ${ss.end_error}`;
+        }
+        expandDataLocal.push({
+          key: t('流状态'),
+          value: streamValue,
+        });
+        if (Array.isArray(ss.errors) && ss.errors.length > 0) {
+          expandDataLocal.push({
+            key: t('流错误详情'),
+            value: (
+              <div style={{ maxWidth: 600, whiteSpace: 'pre-line', wordBreak: 'break-word', lineHeight: 1.6 }}>
+                {ss.errors.join('\n')}
+              </div>
+            ),
+          });
+        }
+      }
+      if (Array.isArray(other?.po) && other.po.length > 0) {
+        expandDataLocal.push({
+          key: t('参数覆盖'),
+          value: (
+            <ParamOverrideEntry
+              count={other.po.length}
+              t={t}
+              onOpen={(event) => {
+                event.stopPropagation();
+                openParamOverrideModal(logs[i], other);
+              }}
+            />
+          ),
         });
       }
       if (other?.billing_source === 'subscription') {
@@ -608,13 +623,13 @@ export const useLogsData = () => {
           ),
         });
       }
-      if (isAdminUser && logs[i].type !== 6) {
+      if (isAdminUser && logs[i].type !== 6 && logs[i].type !== 1) {
         expandDataLocal.push({
           key: t('请求转换'),
           value: requestConversionDisplayValue(other?.request_conversion),
         });
       }
-      if (isAdminUser && logs[i].type !== 6) {
+      if (isAdminUser && logs[i].type !== 6 && logs[i].type !== 1) {
         let localCountMode = '';
         if (other?.admin_info?.local_count_tokens) {
           localCountMode = t('本地计费');
@@ -625,6 +640,83 @@ export const useLogsData = () => {
           key: t('计费模式'),
           value: localCountMode,
         });
+      }
+      if (isAdminUser && logs[i].type === 1) {
+        const adminInfo = other?.admin_info;
+        if (adminInfo) {
+          if (adminInfo.payment_method) {
+            expandDataLocal.push({
+              key: t('订单支付方式'),
+              value: adminInfo.payment_method,
+            });
+          }
+          if (adminInfo.callback_payment_method) {
+            expandDataLocal.push({
+              key: t('回调支付方式'),
+              value: adminInfo.callback_payment_method,
+            });
+          }
+          if (adminInfo.caller_ip) {
+            expandDataLocal.push({
+              key: t('回调调用者IP'),
+              value: adminInfo.caller_ip,
+            });
+          }
+          if (adminInfo.server_ip) {
+            expandDataLocal.push({
+              key: t('服务器IP'),
+              value: adminInfo.server_ip,
+            });
+          }
+          if (adminInfo.node_name) {
+            expandDataLocal.push({
+              key: t('节点名称'),
+              value: adminInfo.node_name,
+            });
+          }
+          if (adminInfo.version) {
+            expandDataLocal.push({
+              key: t('系统版本'),
+              value: adminInfo.version,
+            });
+          }
+        } else {
+          expandDataLocal.push({
+            key: t('审计信息'),
+            value: (
+              <span style={{ color: 'var(--semi-color-warning)' }}>
+                {t(
+                  '该记录由旧版本实例写入，缺少审计信息，建议将实例升级至最新版本以便记录服务器IP、回调IP、支付方式与系统版本等审计字段。',
+                )}
+              </span>
+            ),
+          });
+        }
+      }
+      if (isAdminUser && logs[i].type === 3 && other?.admin_info) {
+        const adminInfo = other.admin_info;
+        const hasUsername =
+          adminInfo.admin_username !== undefined &&
+          adminInfo.admin_username !== null &&
+          adminInfo.admin_username !== '';
+        const hasId =
+          adminInfo.admin_id !== undefined &&
+          adminInfo.admin_id !== null &&
+          adminInfo.admin_id !== '';
+        if (hasUsername || hasId) {
+          let operatorValue = '';
+          if (hasUsername && hasId) {
+            operatorValue = `${adminInfo.admin_username} (ID: ${adminInfo.admin_id})`;
+          } else if (hasUsername) {
+            operatorValue = String(adminInfo.admin_username);
+          } else {
+            operatorValue = `ID: ${adminInfo.admin_id}`;
+          }
+          expandDataLocal.push({
+            key: t('操作管理员'),
+            value: operatorValue,
+          });
+        }
       }
       expandDatesLocal[logs[i].key] = expandDataLocal;
     }
@@ -764,6 +856,8 @@ export const useLogsData = () => {
     visibleColumns,
     showColumnSelector,
     setShowColumnSelector,
+    billingDisplayMode,
+    setBillingDisplayMode,
     handleColumnVisibilityChange,
     handleSelectAll,
     initDefaultColumns,
@@ -784,6 +878,9 @@ export const useLogsData = () => {
     setShowChannelAffinityUsageCacheModal,
     channelAffinityUsageCacheTarget,
     openChannelAffinityUsageCacheModal,
+    showParamOverrideModal,
+    setShowParamOverrideModal,
+    paramOverrideTarget,
 
     // Functions
     loadLogs,
@@ -795,6 +892,7 @@ export const useLogsData = () => {
     setLogsFormat,
     hasExpandableRows,
     setLogType,
+    openParamOverrideModal,
 
     // Translation
     t,

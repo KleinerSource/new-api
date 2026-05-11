@@ -38,6 +38,7 @@ import {
   stringToColor,
   calculateModelPrice,
   formatPriceInfo,
+  formatDynamicPriceSummary,
   getLobeHubIcon,
 } from '../../../../../helpers';
 import PricingCardSkeleton from './PricingCardSkeleton';
@@ -67,6 +68,7 @@ const PricingCardView = ({
   setModalImageUrl,
   setIsModalOpenurl,
   currency,
+  siteDisplayType,
   tokenUnit,
   displayPrice,
   showRatio,
@@ -246,6 +248,7 @@ const PricingCardView = ({
             tokenUnit,
             displayPrice,
             currency,
+            quotaDisplayType: siteDisplayType,
           });
 
           return (
@@ -264,8 +267,12 @@ const PricingCardView = ({
                       <h3 className='text-lg font-bold text-gray-900 truncate'>
                         {model.model_name}
                       </h3>
-                      <div className='flex items-center gap-3 text-xs mt-1'>
-                        {formatPriceInfo(priceData, t)}
+                      <div className='flex flex-col gap-1 text-xs mt-1'>
+                        {priceData.isDynamicPricing ? (
+                          formatDynamicPriceSummary(priceData.billingExpr, t, priceData.usedGroupRatio)
+                        ) : (
+                          formatPriceInfo(priceData, t, siteDisplayType)
+                        )}
                       </div>
                     </div>
                   </div>

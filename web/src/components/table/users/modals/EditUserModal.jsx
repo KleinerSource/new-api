@@ -24,7 +24,6 @@ import {
   showError,
   showSuccess,
   renderQuota,
-  renderQuotaWithPrompt,
   getCurrencyConfig,
 } from '../../../../helpers';
 import {
@@ -45,8 +44,9 @@ import {
   Avatar,
   Row,
   Col,
-  Input,
   InputNumber,
+  RadioGroup,
+  Radio,
 } from '@douyinfe/semi-ui';
 import {
   IconUser,
@@ -54,8 +54,9 @@ import {
   IconClose,
   IconLink,
   IconUserGroup,
-  IconPlus,
+  IconEdit,
 } from '@douyinfe/semi-icons';
+import UserBindingManagementModal from './UserBindingManagementModal';
 
 const { Text, Title } = Typography;
 
@@ -63,12 +64,18 @@ const EditUserModal = (props) => {
   const { t } = useTranslation();
   const userId = props.editingUser.id;
   const [loading, setLoading] = useState(true);
-  const [addQuotaModalOpen, setIsModalOpen] = useState(false);
-  const [addQuotaLocal, setAddQuotaLocal] = useState('');
-  const [addAmountLocal, setAddAmountLocal] = useState('');
+  const [adjustModalOpen, setAdjustModalOpen] = useState(false);
+  const [adjustQuotaLocal, setAdjustQuotaLocal] = useState('');
+  const [adjustAmountLocal, setAdjustAmountLocal] = useState('');
+  const [adjustMode, setAdjustMode] = useState('add');
+  const [adjustLoading, setAdjustLoading] = useState(false);
   const isMobile = useIsMobile();
   const [groupOptions, setGroupOptions] = useState([]);
+  const [bindingModalVisible, setBindingModalVisible] = useState(false);
   const formApiRef = useRef(null);
+  const [showAdjustQuotaRaw, setShowAdjustQuotaRaw] = useState(false);
+  const [showQuotaInput, setShowQuotaInput] = useState(false);
+  const [inputs, setInputs] = useState(null);
 
   const isEdit = Boolean(userId);
 
@@ -81,8 +88,10 @@ const EditUserModal = (props) => {
     discord_id: '',
     wechat_id: '',
     telegram_id: '',
+    linux_do_id: '',
     email: '',
     quota: 0,
+    quota_amount: 0,
     group: 'default',
     remark: '',
   });
@@ -105,7 +114,10 @@ const EditUserModal = (props) => {
     const { success, message, data } = res.data;
     if (success) {
       data.password = '';
-      formApiRef.current?.setValues({ ...getInitValues(), ...data });
+      data.quota_amount = Number(
+        quotaToDisplayAmount(data.quota || 0).toFixed(6),
+      );
+      setInputs({ ...getInitValues(), ...data });
     } else {
       showError(message);
     }
@@ -113,16 +125,31 @@ const EditUserModal = (props) => {
   };
 
   useEffect(() => {
+    if (inputs && formApiRef.current) {
+      formApiRef.current.setValues(inputs);
+    }
+  }, [inputs]);
+
+  useEffect(() => {
     loadUser();
     if (userId) fetchGroups();
+    setBindingModalVisible(false);
   }, [props.editingUser.id]);
+
+  const openBindingModal = () => {
+    setBindingModalVisible(true);
+  };
+
+  const closeBindingModal = () => {
+    setBindingModalVisible(false);
+  };
 
   /* ----------------------- submit ----------------------- */
   const submit = async (values) => {
     setLoading(true);
     let payload = { ...values };
-    if (typeof payload.quota === 'string')
-      payload.quota = parseInt(payload.quota) || 0;
+    delete payload.quota;
+    delete payload.quota_amount;
     if (userId) {
       payload.id = parseInt(userId);
     }
@@ -139,11 +166,60 @@ const EditUserModal = (props) => {
     setLoading(false);
   };
 
-  /* --------------------- quota helper -------------------- */
-  const addLocalQuota = () => {
-    const current = parseInt(formApiRef.current?.getValue('quota') || 0);
-    const delta = parseInt(addQuotaLocal) || 0;
-    formApiRef.current?.setValue('quota', current + delta);
+  /* --------------------- atomic quota adjust -------------------- */
+  const adjustQuota = async () => {
+    const quotaVal = parseInt(adjustQuotaLocal) || 0;
+    if (quotaVal <= 0 && adjustMode !== 'override') return;
+    if (adjustMode === 'override' && (adjustQuotaLocal === '' || adjustQuotaLocal == null)) return;
+    setAdjustLoading(true);
+    try {
+      const res = await API.post('/api/user/manage', {
+        id: parseInt(userId),
+        action: 'add_quota',
+        mode: adjustMode,
+        value: adjustMode === 'override' ? quotaVal : Math.abs(quotaVal),
+      });
+      const { success, message } = res.data;
+      if (success) {
+        showSuccess(t('调整额度成功'));
+        setAdjustModalOpen(false);
+        setAdjustQuotaLocal('');
+        setAdjustAmountLocal('');
+        const userRes = await API.get(`/api/user/${userId}`);
+        if (userRes.data.success) {
+          const data = userRes.data.data;
+          data.password = '';
+          data.quota_amount = Number(
+            quotaToDisplayAmount(data.quota || 0).toFixed(6),
+          );
+          setInputs({ ...getInitValues(), ...data });
+        }
+        props.refresh();
+      } else {
+        showError(message);
+      }
+    } catch (e) {
+      showError(e.message);
+    }
+    setAdjustLoading(false);
+  };
+
+  const getPreviewText = () => {
+    const current = formApiRef.current?.getValue('quota') || 0;
+    const val = parseInt(adjustQuotaLocal) || 0;
+    let result;
+    switch (adjustMode) {
+      case 'add':
+        result = current + Math.abs(val);
+        return `${t('当前额度')}：${renderQuota(current)}，+${renderQuota(Math.abs(val))} = ${renderQuota(result)}`;
+      case 'subtract':
+        result = current - Math.abs(val);
+        return `${t('当前额度')}：${renderQuota(current)}，-${renderQuota(Math.abs(val))} = ${renderQuota(result)}`;
+      case 'override':
+        return `${t('当前额度')}：${renderQuota(current)} → ${renderQuota(val)}`;
+      default:
+        return '';
+    }
   };
 
   /* --------------------------- UI --------------------------- */
@@ -196,7 +272,7 @@ const EditUserModal = (props) => {
             onSubmit={submit}
           >
             {({ values }) => (
-              <div className='p-2'>
+              <div className='p-2 space-y-3'>
                 {/* 基本信息 */}
                 <Card className='!rounded-2xl shadow-sm border-0'>
                   <div className='flex items-center mb-2'>
@@ -294,144 +370,192 @@ const EditUserModal = (props) => {
 
                       <Col span={10}>
                         <Form.InputNumber
-                          field='quota'
-                          label={t('剩余额度')}
-                          placeholder={t('请输入新的剩余额度')}
-                          step={500000}
-                          extraText={renderQuotaWithPrompt(values.quota || 0)}
-                          rules={[{ required: true, message: t('请输入额度') }]}
+                          field='quota_amount'
+                          label={t('金额')}
+                          prefix={getCurrencyConfig().symbol}
+                          precision={6}
+                          step={0.000001}
                           style={{ width: '100%' }}
+                          readonly
                         />
                       </Col>
 
                       <Col span={14}>
-                        <Form.Slot label={t('添加额度')}>
+                        <Form.Slot label={t('调整额度')}>
                           <Button
-                            icon={<IconPlus />}
-                            onClick={() => setIsModalOpen(true)}
-                          />
+                            icon={<IconEdit />}
+                            onClick={() => setAdjustModalOpen(true)}
+                          >
+                            {t('调整额度')}
+                          </Button>
                         </Form.Slot>
+                      </Col>
+
+                      <Col span={24}>
+                        <div
+                          className='text-xs cursor-pointer'
+                          style={{ color: 'var(--semi-color-text-2)' }}
+                          onClick={() => setShowQuotaInput((v) => !v)}
+                        >
+                          {showQuotaInput
+                            ? `▾ ${t('收起原生额度输入')}`
+                            : `▸ ${t('使用原生额度输入')}`}
+                        </div>
+                        <div style={{ display: showQuotaInput ? 'block' : 'none' }} className='mt-2'>
+                          <Form.InputNumber
+                            field='quota'
+                            label={t('额度')}
+                            placeholder={t('请输入额度')}
+                            style={{ width: '100%' }}
+                            readonly
+                          />
+                        </div>
                       </Col>
                     </Row>
                   </Card>
                 )}
 
-                {/* 绑定信息 */}
-                <Card className='!rounded-2xl shadow-sm border-0'>
-                  <div className='flex items-center mb-2'>
-                    <Avatar
-                      size='small'
-                      color='purple'
-                      className='mr-2 shadow-md'
-                    >
-                      <IconLink size={16} />
-                    </Avatar>
-                    <div>
-                      <Text className='text-lg font-medium'>
-                        {t('绑定信息')}
-                      </Text>
-                      <div className='text-xs text-gray-600'>
-                        {t('第三方账户绑定状态（只读）')}
+                {/* 绑定信息入口 */}
+                {userId && (
+                  <Card className='!rounded-2xl shadow-sm border-0'>
+                    <div className='flex items-center justify-between gap-3'>
+                      <div className='flex items-center min-w-0'>
+                        <Avatar
+                          size='small'
+                          color='purple'
+                          className='mr-2 shadow-md'
+                        >
+                          <IconLink size={16} />
+                        </Avatar>
+                        <div className='min-w-0'>
+                          <Text className='text-lg font-medium'>
+                            {t('绑定信息')}
+                          </Text>
+                          <div className='text-xs text-gray-600'>
+                            {t('管理用户已绑定的第三方账户，支持筛选与解绑')}
+                          </div>
+                        </div>
                       </div>
+                      <Button
+                        type='primary'
+                        theme='outline'
+                        onClick={openBindingModal}
+                      >
+                        {t('管理绑定')}
+                      </Button>
                     </div>
-                  </div>
-
-                  <Row gutter={12}>
-                    {[
-                      'github_id',
-                      'discord_id',
-                      'oidc_id',
-                      'wechat_id',
-                      'email',
-                      'telegram_id',
-                    ].map((field) => (
-                      <Col span={24} key={field}>
-                        <Form.Input
-                          field={field}
-                          label={t(
-                            `已绑定的 ${field.replace('_id', '').toUpperCase()} 账户`,
-                          )}
-                          readonly
-                          placeholder={t(
-                            '此项只读，需要用户通过个人设置页面的相关绑定按钮进行绑定，不可直接修改',
-                          )}
-                        />
-                      </Col>
-                    ))}
-                  </Row>
-                </Card>
+                  </Card>
+                )}
               </div>
             )}
           </Form>
         </Spin>
       </SideSheet>
 
-      {/* 添加额度模态框 */}
+      <UserBindingManagementModal
+        visible={bindingModalVisible}
+        onCancel={closeBindingModal}
+        userId={userId}
+        isMobile={isMobile}
+        formApiRef={formApiRef}
+      />
+
+      {/* 调整额度模态框 */}
       <Modal
         centered
-        visible={addQuotaModalOpen}
-        onOk={() => {
-          addLocalQuota();
-          setIsModalOpen(false);
-          setAddQuotaLocal('');
-          setAddAmountLocal('');
-        }}
+        visible={adjustModalOpen}
+        onOk={adjustQuota}
         onCancel={() => {
-          setIsModalOpen(false);
+          setAdjustModalOpen(false);
+          setAdjustQuotaLocal('');
+          setAdjustAmountLocal('');
+          setAdjustMode('add');
         }}
+        confirmLoading={adjustLoading}
         closable={null}
         title={
           <div className='flex items-center'>
-            <IconPlus className='mr-2' />
-            {t('添加额度')}
+            <IconEdit className='mr-2' />
+            {t('调整额度')}
           </div>
         }
       >
         <div className='mb-4'>
-          {(() => {
-            const current = formApiRef.current?.getValue('quota') || 0;
-            return (
-              <Text type='secondary' className='block mb-2'>
-                {`${t('新额度：')}${renderQuota(current)} + ${renderQuota(addQuotaLocal)} = ${renderQuota(current + parseInt(addQuotaLocal || 0))}`}
-              </Text>
-            );
-          })()}
+          <Text type='secondary' className='block mb-2'>
+            {getPreviewText()}
+          </Text>
         </div>
-        {getCurrencyConfig().type !== 'TOKENS' && (
-          <div className='mb-3'>
-            <div className='mb-1'>
-              <Text size='small'>{t('金额')}</Text>
-              <Text size='small' type='tertiary'> ({t('仅用于换算，实际保存的是额度')})</Text>
-            </div>
-            <InputNumber
-              prefix={getCurrencyConfig().symbol}
-              placeholder={t('输入金额')}
-              value={addAmountLocal}
-              precision={2}
-              onChange={(val) => {
-                setAddAmountLocal(val);
-                setAddQuotaLocal(
-                  val != null && val !== '' ? displayAmountToQuota(Math.abs(val)) * Math.sign(val) : '',
-                );
-              }}
-              style={{ width: '100%' }}
-              showClear
-            />
+        <div className='mb-3'>
+          <div className='mb-1'>
+            <Text size='small'>{t('操作')}</Text>
           </div>
-        )}
-        <div>
+          <RadioGroup
+            type='button'
+            value={adjustMode}
+            onChange={(e) => {
+              setAdjustMode(e.target.value);
+              setAdjustQuotaLocal('');
+              setAdjustAmountLocal('');
+            }}
+            style={{ width: '100%' }}
+          >
+            <Radio value='add'>{t('添加')}</Radio>
+            <Radio value='subtract'>{t('减少')}</Radio>
+            <Radio value='override'>{t('覆盖')}</Radio>
+          </RadioGroup>
+        </div>
+        <div className='mb-3'>
+          <div className='mb-1'>
+            <Text size='small'>{t('金额')}</Text>
+          </div>
+          <InputNumber
+            prefix={getCurrencyConfig().symbol}
+            placeholder={t('输入金额')}
+            value={adjustAmountLocal}
+            precision={6}
+            min={adjustMode === 'override' ? undefined : 0}
+            step={0.000001}
+            onChange={(val) => {
+              const amount = val === '' || val == null ? '' : val;
+              setAdjustAmountLocal(amount);
+              setAdjustQuotaLocal(
+                amount === ''
+                  ? ''
+                  : adjustMode === 'override'
+                    ? displayAmountToQuota(amount)
+                    : displayAmountToQuota(Math.abs(amount)),
+              );
+            }}
+            style={{ width: '100%' }}
+            showClear
+          />
+        </div>
+        <div
+          className='text-xs cursor-pointer mt-2'
+          style={{ color: 'var(--semi-color-text-2)' }}
+          onClick={() => setShowAdjustQuotaRaw((v) => !v)}
+        >
+          {showAdjustQuotaRaw
+            ? `▾ ${t('收起原生额度输入')}`
+            : `▸ ${t('使用原生额度输入')}`}
+        </div>
+        <div style={{ display: showAdjustQuotaRaw ? 'block' : 'none' }} className='mt-2'>
           <div className='mb-1'>
             <Text size='small'>{t('额度')}</Text>
           </div>
           <InputNumber
             placeholder={t('输入额度')}
-            value={addQuotaLocal}
+            value={adjustQuotaLocal}
+            min={adjustMode === 'override' ? undefined : 0}
             onChange={(val) => {
-              setAddQuotaLocal(val);
-              setAddAmountLocal(
-                val != null && val !== ''
-                  ? Number((quotaToDisplayAmount(Math.abs(val)) * Math.sign(val)).toFixed(2))
-                  : '',
+              const quota = val === '' || val == null ? '' : val;
+              setAdjustQuotaLocal(quota);
+              setAdjustAmountLocal(
+                quota === ''
+                  ? ''
+                  : adjustMode === 'override'
+                    ? Number(quotaToDisplayAmount(quota).toFixed(6))
+                    : Number(quotaToDisplayAmount(Math.abs(quota)).toFixed(6)),
               );
             }}
             style={{ width: '100%' }}

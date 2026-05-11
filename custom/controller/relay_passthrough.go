@@ -394,7 +394,7 @@ func calculateInputTokens(c *gin.Context, req ChatStreamRequest, modelName strin
 		if imageData == "" {
 			continue
 		}
-		var source *types.FileSource
+		var source types.FileSource
 		if strings.HasPrefix(imageData, "http") {
 			source = types.NewURLFileSource(imageData)
 		} else {
