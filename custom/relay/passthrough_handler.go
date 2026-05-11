@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -188,16 +189,23 @@ func passthroughNonStreamResponseWithUsage(c *gin.Context, resp *http.Response, 
 		logger.LogDebug(c, fmt.Sprintf("passthrough response body: %s", string(responseBody)))
 	}
 
-	service.IOCopyBytesGracefully(c, resp, responseBody)
+	if apiErr := detectPassthroughErrorResponse(responseBody, resp.StatusCode); apiErr != nil {
+		return nil, apiErr
+	}
 
 	result := GetPassthroughResult(responseBody, false)
+	service.IOCopyBytesGracefully(c, resp, responseBody)
 	return result, nil
 }
 
 // PassthroughResult 传透模式结果，包含 usage 和响应内容
 type PassthroughResult struct {
-	Usage           *dto.Usage
-	ResponseContent string // 响应中的文本内容，用于本地计算 token
+	Usage                *dto.Usage
+	ResponseContent      string // 响应中的文本内容，用于本地计算 token
+	ResponseBody         string
+	UpstreamError        bool
+	UpstreamErrorMessage string
+	UpstreamStopReason   string
 }
 
 // extractUsageAndContentFromStreamData 从流式数据中提取 usage 和内容
@@ -222,13 +230,14 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 
 		// 支持 usage 和 token_usage 两种字段名
 		var streamResp struct {
-			Usage      *dto.Usage `json:"usage"`
-			TokenUsage *dto.Usage `json:"token_usage"`
-			Text       string     `json:"text"`
+			Usage      *dto.Usage      `json:"usage"`
+			TokenUsage *dto.Usage      `json:"token_usage"`
+			Text       string          `json:"text"`
+			StopReason json.RawMessage `json:"stop_reason"`
 			Nodes      []struct {
 				Content string `json:"content"`
 			} `json:"nodes"`
-			Choices    []struct {
+			Choices []struct {
 				Delta struct {
 					Content string `json:"content"`
 				} `json:"delta"`
@@ -244,6 +253,7 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 			}
 			// 累积所有 delta.content 与 text
 			hasChunkContent := false
+			chunkContent := streamResp.Text
 			if streamResp.Text != "" {
 				contentBuilder.WriteString(streamResp.Text)
 				hasChunkContent = true
@@ -251,10 +261,12 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 			for _, choice := range streamResp.Choices {
 				if choice.Delta.Content != "" {
 					contentBuilder.WriteString(choice.Delta.Content)
+					chunkContent += choice.Delta.Content
 					hasChunkContent = true
 				}
 				if choice.Text != "" {
 					contentBuilder.WriteString(choice.Text)
+					chunkContent += choice.Text
 					hasChunkContent = true
 				}
 			}
@@ -262,13 +274,16 @@ func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 				for _, node := range streamResp.Nodes {
 					if node.Content != "" {
 						contentBuilder.WriteString(node.Content)
+						chunkContent += node.Content
 					}
 				}
 			}
+			markStopReasonError(result, streamResp.StopReason, chunkContent)
 		}
 	}
 
 	result.ResponseContent = contentBuilder.String()
+	result.ResponseBody = string(data)
 
 	// 调试日志
 	if common.DebugEnabled {
@@ -288,13 +303,14 @@ func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult 
 	result := &PassthroughResult{}
 
 	var response struct {
-		Usage      *dto.Usage `json:"usage"`
-		TokenUsage *dto.Usage `json:"token_usage"`
-		Text       string     `json:"text"`
+		Usage      *dto.Usage      `json:"usage"`
+		TokenUsage *dto.Usage      `json:"token_usage"`
+		Text       string          `json:"text"`
+		StopReason json.RawMessage `json:"stop_reason"`
 		Nodes      []struct {
 			Content string `json:"content"`
 		} `json:"nodes"`
-		Choices    []struct {
+		Choices []struct {
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
@@ -331,7 +347,9 @@ func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult 
 				}
 			}
 		}
+		markStopReasonError(result, response.StopReason, result.ResponseContent)
 	}
+	result.ResponseBody = string(responseBody)
 
 	// 调试日志
 	if common.DebugEnabled {
@@ -344,6 +362,42 @@ func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult 
 	}
 
 	return result
+}
+
+func detectPassthroughErrorResponse(responseBody []byte, statusCode int) *types.NewAPIError {
+	var errResponse dto.GeneralErrorResponse
+	if err := common.Unmarshal(responseBody, &errResponse); err != nil {
+		return nil
+	}
+	if isJSONNullRaw(errResponse.Error) {
+		return nil
+	}
+	if openAIError := errResponse.TryToOpenAIError(); openAIError != nil {
+		return types.WithOpenAIError(*openAIError, statusCode, types.ErrOptionWithSkipRetry())
+	}
+	message := errResponse.ToMessage()
+	if message == "" || message == "null" {
+		return nil
+	}
+	return types.NewOpenAIError(errors.New(message), types.ErrorCodeBadResponseBody, statusCode, types.ErrOptionWithSkipRetry())
+}
+
+func markStopReasonError(result *PassthroughResult, stopReason json.RawMessage, message string) {
+	if result == nil || isJSONNullRaw(stopReason) {
+		return
+	}
+	result.UpstreamError = true
+	result.UpstreamStopReason = string(bytes.TrimSpace(stopReason))
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = fmt.Sprintf("upstream stop_reason=%s", result.UpstreamStopReason)
+	}
+	result.UpstreamErrorMessage = message
+}
+
+func isJSONNullRaw(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }
 
 // GetPassthroughResult 从响应中提取完整结果

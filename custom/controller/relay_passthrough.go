@@ -138,6 +138,14 @@ func RelayPassthrough(c *gin.Context) {
 		passthroughResult, newAPIError = relay.PassthroughHelperWithUsage(c, relayInfo)
 
 		if newAPIError == nil {
+			if passthroughResult != nil && passthroughResult.UpstreamError {
+				logger.LogWarn(c, fmt.Sprintf("passthrough upstream returned non-billable response: %s", passthroughResult.UpstreamErrorMessage))
+				if relayInfo.Billing != nil {
+					relayInfo.Billing.Refund(c)
+				}
+				recordPassthroughUpstreamErrorLog(c, relayInfo, passthroughResult)
+				return
+			}
 			postPassthroughConsumeQuotaWithResult(c, relayInfo, passthroughResult, estimatedInputTokens)
 			return
 		}
@@ -438,6 +446,78 @@ func shouldRetry(c *gin.Context, err *types.NewAPIError, retryTimesLeft int) boo
 // processChannelError 处理渠道错误
 func processChannelError(c *gin.Context, channelErr types.ChannelError, apiErr *types.NewAPIError) {
 	logger.LogError(c, fmt.Sprintf("channel %d (%s) error: %s", channelErr.ChannelId, channelErr.ChannelName, apiErr.Error()))
+}
+
+func recordPassthroughUpstreamErrorLog(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, result *relay.PassthroughResult) {
+	if !constant.ErrorLogEnabled {
+		return
+	}
+
+	startTime := common.GetContextKeyTime(ctx, constant.ContextKeyRequestStartTime)
+	if startTime.IsZero() {
+		startTime = relayInfo.StartTime
+	}
+	if startTime.IsZero() {
+		startTime = time.Now()
+	}
+	useTimeSeconds := int(time.Since(startTime).Seconds())
+	tokenName := ctx.GetString("token_name")
+	reason := "上游返回 stop_reason，已取消本次扣费"
+	if result != nil && result.UpstreamErrorMessage != "" {
+		reason = fmt.Sprintf("%s：%s", reason, result.UpstreamErrorMessage)
+	}
+
+	content := reason
+	if result != nil {
+		responseBody := strings.TrimSpace(result.ResponseBody)
+		if responseBody == "" {
+			responseBody = strings.TrimSpace(result.ResponseContent)
+		}
+		if responseBody != "" {
+			content = fmt.Sprintf("%s，响应内容：%s", reason, responseBody)
+		}
+	}
+
+	other := make(map[string]interface{})
+	if ctx.Request != nil && ctx.Request.URL != nil {
+		other["request_path"] = ctx.Request.URL.Path
+	}
+	other["error_type"] = string(types.ErrorTypeUpstreamError)
+	other["error_code"] = "passthrough_stop_reason"
+	other["status_code"] = http.StatusOK
+	other["channel_id"] = relayInfo.ChannelId
+	other["channel_name"] = ctx.GetString("channel_name")
+	other["channel_type"] = ctx.GetInt("channel_type")
+	other["passthrough"] = true
+	other["billing_cancelled"] = true
+	if result != nil {
+		other["stop_reason"] = result.UpstreamStopReason
+		other["response_content"] = result.ResponseContent
+		other["upstream_response"] = result.ResponseBody
+	}
+	adminInfo := make(map[string]interface{})
+	adminInfo["use_channel"] = ctx.GetStringSlice("use_channel")
+	isMultiKey := common.GetContextKeyBool(ctx, constant.ContextKeyChannelIsMultiKey)
+	if isMultiKey {
+		adminInfo["is_multi_key"] = true
+		adminInfo["multi_key_index"] = common.GetContextKeyInt(ctx, constant.ContextKeyChannelMultiKeyIndex)
+	}
+	service.AppendChannelAffinityAdminInfo(ctx, adminInfo)
+	other["admin_info"] = adminInfo
+
+	model.RecordErrorLog(
+		ctx,
+		relayInfo.UserId,
+		relayInfo.ChannelId,
+		relayInfo.OriginModelName,
+		tokenName,
+		content,
+		relayInfo.TokenId,
+		useTimeSeconds,
+		relayInfo.IsStream,
+		relayInfo.UsingGroup,
+		other,
+	)
 }
 
 // postPassthroughConsumeQuotaWithResult 传透模式的消费记录
