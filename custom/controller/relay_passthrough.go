@@ -458,20 +458,10 @@ func recordPassthroughUpstreamErrorLog(ctx *gin.Context, relayInfo *relaycommon.
 	}
 	useTimeSeconds := int(time.Since(startTime).Seconds())
 	tokenName := ctx.GetString("token_name")
-	reason := "上游返回 stop_reason，已取消本次扣费"
-	if result != nil && result.UpstreamErrorMessage != "" {
-		reason = fmt.Sprintf("%s：%s", reason, result.UpstreamErrorMessage)
-	}
 
-	content := reason
+	content := ""
 	if result != nil {
-		responseBody := strings.TrimSpace(result.ResponseBody)
-		if responseBody == "" {
-			responseBody = strings.TrimSpace(result.ResponseContent)
-		}
-		if responseBody != "" {
-			content = fmt.Sprintf("%s，响应内容：%s", reason, responseBody)
-		}
+		content = strings.TrimSpace(result.ResponseContent)
 	}
 
 	other := make(map[string]interface{})
@@ -486,11 +476,6 @@ func recordPassthroughUpstreamErrorLog(ctx *gin.Context, relayInfo *relaycommon.
 	other["channel_type"] = ctx.GetInt("channel_type")
 	other["passthrough"] = true
 	other["billing_cancelled"] = true
-	if result != nil {
-		other["stop_reason"] = result.UpstreamStopReason
-		other["response_content"] = result.ResponseContent
-		other["upstream_response"] = result.ResponseBody
-	}
 	adminInfo := make(map[string]interface{})
 	adminInfo["use_channel"] = ctx.GetStringSlice("use_channel")
 	isMultiKey := common.GetContextKeyBool(ctx, constant.ContextKeyChannelIsMultiKey)
