@@ -449,10 +449,6 @@ func processChannelError(c *gin.Context, channelErr types.ChannelError, apiErr *
 }
 
 func recordPassthroughUpstreamErrorLog(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, result *relay.PassthroughResult) {
-	if !constant.ErrorLogEnabled {
-		return
-	}
-
 	startTime := common.GetContextKeyTime(ctx, constant.ContextKeyRequestStartTime)
 	if startTime.IsZero() {
 		startTime = relayInfo.StartTime

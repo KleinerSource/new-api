@@ -210,6 +210,11 @@ type PassthroughResult struct {
 
 // extractUsageAndContentFromStreamData 从流式数据中提取 usage 和内容
 func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
+	trimmedData := bytes.TrimSpace(data)
+	if bytes.HasPrefix(trimmedData, []byte("{")) && common.Unmarshal(trimmedData, &map[string]interface{}{}) == nil {
+		return extractUsageAndContentFromResponse(trimmedData)
+	}
+
 	result := &PassthroughResult{}
 	var contentBuilder bytes.Buffer
 
@@ -383,7 +388,7 @@ func detectPassthroughErrorResponse(responseBody []byte, statusCode int) *types.
 }
 
 func markStopReasonError(result *PassthroughResult, stopReason json.RawMessage, message string) {
-	if result == nil || isJSONNullRaw(stopReason) {
+	if result == nil || !isErrorStopReason(stopReason) {
 		return
 	}
 	result.UpstreamError = true
@@ -398,6 +403,30 @@ func markStopReasonError(result *PassthroughResult, stopReason json.RawMessage, 
 func isJSONNullRaw(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
 	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
+}
+
+func isErrorStopReason(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return false
+	}
+	var value interface{}
+	if err := common.Unmarshal(trimmed, &value); err != nil {
+		return true
+	}
+	switch v := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return v
+	case float64:
+		return v != 0
+	case string:
+		normalized := strings.TrimSpace(strings.ToLower(v))
+		return normalized != "" && normalized != "0" && normalized != "null"
+	default:
+		return true
+	}
 }
 
 // GetPassthroughResult 从响应中提取完整结果
