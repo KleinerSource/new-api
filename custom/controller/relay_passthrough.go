@@ -216,45 +216,10 @@ var ErrNoBugmentChannel = errors.New("此接口仅支持标签包含 bugment 的
 // 注意：不检查 model，因为 bugment 渠道是透传渠道，支持所有模型
 // 支持重试机制，retry 参数用于在多个渠道间切换优先级
 func getRandomBugmentChannel(group string, retry int) (*model.Channel, error) {
-	// 构建兼容不同数据库的查询条件
-	groupCol := "`group`"
-	tagCol := "`tag`"
-	if common.UsingPostgreSQL {
-		groupCol = `"group"`
-		tagCol = `"tag"`
-	}
-
-	// group 字段格式是 "group1,group2"，需要用 CONCAT 添加前后逗号来精确匹配
-	var groupCondition string
-	if common.UsingMySQL {
-		groupCondition = fmt.Sprintf("CONCAT(',', %s, ',') LIKE ?", groupCol)
-	} else {
-		groupCondition = fmt.Sprintf("(',' || %s || ',') LIKE ?", groupCol)
-	}
-
-	// 构建标签查询条件（不区分大小写）
-	tagCondition := fmt.Sprintf("LOWER(%s) LIKE ?", tagCol)
-
-	// 查询该 Group 下所有标签包含 bugment 的渠道（不检查 model）
-	var channels []*model.Channel
-	err := model.DB.Where("status = ?", 1).
-		Where(groupCondition, "%,"+group+",%").
-		Where(tagCondition, "%bugment%").
-		Order("priority DESC").
-		Find(&channels).Error
-
+	bugmentChannels, err := listBugmentChannelsByGroup(group)
 	if err != nil {
-		return nil, fmt.Errorf("查询渠道失败: %w", err)
+		return nil, err
 	}
-
-	// 进一步过滤，确保标签包含 bugment（双重验证）
-	var bugmentChannels []*model.Channel
-	for _, ch := range channels {
-		if isBugmentChannel(ch) {
-			bugmentChannels = append(bugmentChannels, ch)
-		}
-	}
-
 	if len(bugmentChannels) == 0 {
 		return nil, ErrNoBugmentChannel
 	}

@@ -1,12 +1,9 @@
 package controller
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
-	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -18,27 +15,13 @@ import (
 // GetTokenBalance 获取 Token 余额信息
 // GET /usage/api/balance
 func GetTokenBalance(c *gin.Context) {
-	authHeader := c.GetHeader("Authorization")
-	if authHeader == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"success": false,
-			"message": "No Authorization header",
-		})
+	tokenKey, ok := requireBearerToken(c)
+	if !ok {
 		return
 	}
-
-	parts := strings.Split(authHeader, " ")
-	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"success": false,
-			"message": "Invalid Bearer token",
-		})
-		return
-	}
-	tokenKey := parts[1]
 
 	// 强制从数据库读取，确保余额数据准确（不使用 Redis 缓存）
-	token, err := model.GetTokenByKey(strings.TrimPrefix(tokenKey, "sk-"), true)
+	token, err := model.GetTokenByKey(tokenKey, true)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -116,7 +99,7 @@ func getUpstreamLoginToken(c *gin.Context, tokenGroup string, tokenKey string) i
 	}
 
 	// 透传请求到上游
-	resp, err := proxyGetBalanceRequest(channel, tokenKey)
+	resp, err := proxyGetBalanceRequest(channel)
 	if err != nil {
 		logger.LogWarn(c, fmt.Sprintf("透传 balance 请求失败: %s", err.Error()))
 		return nil
@@ -138,7 +121,7 @@ func getUpstreamLoginToken(c *gin.Context, tokenGroup string, tokenKey string) i
 		} `json:"data"`
 	}
 
-	if err := json.Unmarshal(body, &upstreamResp); err != nil {
+	if err := common.Unmarshal(body, &upstreamResp); err != nil {
 		logger.LogWarn(c, fmt.Sprintf("解析上游响应失败: %s", err.Error()))
 		return nil
 	}
@@ -152,35 +135,8 @@ func getUpstreamLoginToken(c *gin.Context, tokenGroup string, tokenKey string) i
 }
 
 // proxyGetBalanceRequest 透传获取余额请求到上游
-func proxyGetBalanceRequest(channel *model.Channel, originalToken string) (*http.Response, error) {
-	baseURL := channel.GetBaseURL()
-	if baseURL == "" {
-		return nil, fmt.Errorf("渠道 Base URL 为空")
-	}
-
-	// 清理 baseURL：移除末尾的斜杠和 /chat-stream 路径
-	baseURL = strings.TrimSuffix(baseURL, "/")
-	baseURL = strings.TrimSuffix(baseURL, "/chat-stream")
-
-	// 构建上游请求 URL
-	upstreamURL := fmt.Sprintf("%s/usage/api/balance", baseURL)
-
-	// 创建请求
-	req, err := http.NewRequest(http.MethodGet, upstreamURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
-	}
-
-	// 使用渠道的 Key 作为上游认证
-	req.Header.Set("Authorization", "Bearer "+channel.Key)
-	req.Header.Set("Content-Type", "application/json")
-
-	// 发送请求
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	return client.Do(req)
+func proxyGetBalanceRequest(channel *model.Channel) (*http.Response, error) {
+	return proxyUpstreamRequest(channel, http.MethodGet, "/usage/api/balance")
 }
 
 // getTokenStatusText 根据状态码返回状态文本
@@ -198,4 +154,3 @@ func getTokenStatusText(status int) string {
 		return "unknown"
 	}
 }
-
