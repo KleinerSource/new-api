@@ -405,11 +405,21 @@ func markStopReasonError(result *PassthroughResult, stopReason json.RawMessage, 
 	}
 	result.UpstreamError = true
 	result.UpstreamStopReason = string(bytes.TrimSpace(stopReason))
-	message = strings.TrimSpace(message)
-	if message == "" {
-		message = fmt.Sprintf("upstream stop_reason=%s", result.UpstreamStopReason)
+	errMsg := extractWarningSegment(message)
+	if errMsg == "" {
+		errMsg = fmt.Sprintf("upstream stop_reason=%s", result.UpstreamStopReason)
 	}
-	result.UpstreamErrorMessage = message
+	result.UpstreamErrorMessage = errMsg
+}
+
+// extractWarningSegment 从可能包含累积正文的 message 中，只截取 ⚠️ 标记的错误片段，
+// 避免把流式累积的正常 text 当作错误详情一起写入日志。
+func extractWarningSegment(message string) string {
+	idx := strings.Index(message, "⚠️")
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimSpace(message[idx:])
 }
 
 func markAugmentStatusError(result *PassthroughResult, augmentStatus string) {
