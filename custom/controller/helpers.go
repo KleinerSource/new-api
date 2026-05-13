@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -37,7 +38,7 @@ func requireBearerToken(c *gin.Context) (string, bool) {
 	return strings.TrimPrefix(parts[1], "sk-"), true
 }
 
-func proxyUpstreamRequest(channel *model.Channel, method string, path string) (*http.Response, error) {
+func proxyUpstreamRequest(ctx context.Context, channel *model.Channel, method string, path string) (*http.Response, error) {
 	baseURL := channel.GetBaseURL()
 	if baseURL == "" {
 		return nil, fmt.Errorf("渠道 Base URL 为空")
@@ -50,7 +51,7 @@ func proxyUpstreamRequest(channel *model.Channel, method string, path string) (*
 	}
 	upstreamURL := baseURL + path
 
-	req, err := http.NewRequest(method, upstreamURL, nil)
+	req, err := http.NewRequestWithContext(ctx, method, upstreamURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -68,7 +69,7 @@ func GetModels(c *gin.Context) {
 	successCount := 0
 	var lastErr error
 	for _, ch := range channels {
-		resp, err := proxyGetModelsRequest(ch)
+		resp, err := proxyGetModelsRequest(c.Request.Context(), ch)
 		if err != nil {
 			lastErr = err
 			common.SysLog(fmt.Sprintf("[GetModels] 渠道[%d]透传请求失败: %s", ch.Id, err.Error()))
@@ -216,6 +217,6 @@ func getBugmentChannelsByGroup(group string) ([]*model.Channel, error) {
 }
 
 // proxyGetModelsRequest 透传获取模型列表请求到上游
-func proxyGetModelsRequest(channel *model.Channel) (*http.Response, error) {
-	return proxyUpstreamRequest(channel, http.MethodGet, "/usage/api/get-models")
+func proxyGetModelsRequest(ctx context.Context, channel *model.Channel) (*http.Response, error) {
+	return proxyUpstreamRequest(ctx, channel, http.MethodGet, "/usage/api/get-models")
 }

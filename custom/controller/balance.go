@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -99,7 +100,7 @@ func getUpstreamLoginToken(c *gin.Context, tokenGroup string, tokenKey string) i
 	}
 
 	// 透传请求到上游
-	resp, err := proxyGetBalanceRequest(channel)
+	resp, err := proxyGetBalanceRequest(c.Request.Context(), channel)
 	if err != nil {
 		logger.LogWarn(c, fmt.Sprintf("透传 balance 请求失败: %s", err.Error()))
 		return nil
@@ -135,8 +136,8 @@ func getUpstreamLoginToken(c *gin.Context, tokenGroup string, tokenKey string) i
 }
 
 // proxyGetBalanceRequest 透传获取余额请求到上游
-func proxyGetBalanceRequest(channel *model.Channel) (*http.Response, error) {
-	return proxyUpstreamRequest(channel, http.MethodGet, "/usage/api/balance")
+func proxyGetBalanceRequest(ctx context.Context, channel *model.Channel) (*http.Response, error) {
+	return proxyUpstreamRequest(ctx, channel, http.MethodGet, "/usage/api/balance")
 }
 
 // getTokenStatusText 根据状态码返回状态文本
