@@ -131,21 +131,63 @@ func passthroughResponseWithUsage(c *gin.Context, resp *http.Response, info *rel
 	}
 
 	augmentStatus := resp.Header.Get(augmentStatusHeader)
-	checkStopReason := !isAugmentStatusFailure(augmentStatus)
 
 	var result *PassthroughResult
 	var apiErr *types.NewAPIError
 	if info.IsStream {
-		result, apiErr = passthroughStreamResponseWithUsage(c, resp, info, checkStopReason)
+		result, apiErr = passthroughStreamResponseWithUsage(c, resp, info)
 	} else {
-		result, apiErr = passthroughNonStreamResponseWithUsage(c, resp, info, checkStopReason)
+		result, apiErr = passthroughNonStreamResponseWithUsage(c, resp, info)
 	}
-	markAugmentStatusError(result, augmentStatus)
+	classifyUpstreamError(result, augmentStatus)
 	return result, apiErr
 }
 
+// classifyUpstreamError 按互斥优先级判定上游错误：
+//  1. X-Augment-Status=500：标错，直接以 ResponseContent 作为错误内容；为空则兜底文案；
+//  2. 否则若 stop_reason 非 null 且内容含 ⚠️ ... ⚠️：标错并截取该段；
+//  3. 都不命中：维持成功状态。
+func classifyUpstreamError(result *PassthroughResult, augmentStatus string) {
+	if result == nil {
+		return
+	}
+	if isAugmentStatusFailure(augmentStatus) {
+		result.UpstreamError = true
+		if content := strings.TrimSpace(result.ResponseContent); content != "" {
+			result.UpstreamErrorMessage = content
+		} else {
+			result.UpstreamErrorMessage = "upstream X-Augment-Status=500"
+		}
+		return
+	}
+	if result.UpstreamStopReason == "" {
+		return
+	}
+	msg := extractWarningSegment(result.ResponseContent)
+	if msg == "" {
+		return
+	}
+	result.UpstreamError = true
+	result.UpstreamErrorMessage = msg
+}
+
+// extractWarningSegment 从可能包含累积正文的 message 中，只截取末尾 ⚠️ 标记的错误片段。
+// 优先匹配末尾一对 ⚠️ ... ⚠️；若只有一个 ⚠️，则截取从最后一个 ⚠️ 起到末尾。
+func extractWarningSegment(message string) string {
+	const marker = "⚠️"
+	end := strings.LastIndex(message, marker)
+	if end < 0 {
+		return ""
+	}
+	start := strings.LastIndex(message[:end], marker)
+	if start < 0 {
+		start = end
+	}
+	return strings.TrimSpace(message[start:])
+}
+
 // passthroughStreamResponseWithUsage 流式响应透传（带 usage 和内容提取）
-func passthroughStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, checkStopReason bool) (*PassthroughResult, *types.NewAPIError) {
+func passthroughStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*PassthroughResult, *types.NewAPIError) {
 	helper.SetEventStreamHeaders(c)
 
 	flusher, ok := c.Writer.(http.Flusher)
@@ -156,7 +198,7 @@ func passthroughStreamResponseWithUsage(c *gin.Context, resp *http.Response, inf
 			return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 		}
 		c.Writer.Write(responseBody)
-		return getPassthroughResult(responseBody, true, checkStopReason), nil
+		return getPassthroughResult(responseBody, true), nil
 	}
 
 	var allData bytes.Buffer
@@ -180,12 +222,12 @@ func passthroughStreamResponseWithUsage(c *gin.Context, resp *http.Response, inf
 		}
 	}
 
-	result := getPassthroughResult(allData.Bytes(), true, checkStopReason)
+	result := getPassthroughResult(allData.Bytes(), true)
 	return result, nil
 }
 
 // passthroughNonStreamResponseWithUsage 非流式响应透传（带 usage 和内容提取）
-func passthroughNonStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, checkStopReason bool) (*PassthroughResult, *types.NewAPIError) {
+func passthroughNonStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*PassthroughResult, *types.NewAPIError) {
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
@@ -201,7 +243,7 @@ func passthroughNonStreamResponseWithUsage(c *gin.Context, resp *http.Response, 
 		return nil, apiErr
 	}
 
-	result := getPassthroughResult(responseBody, false, checkStopReason)
+	result := getPassthroughResult(responseBody, false)
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 	return result, nil
 }
@@ -217,10 +259,10 @@ type PassthroughResult struct {
 }
 
 // extractUsageAndContentFromStreamData 从流式数据中提取 usage 和内容
-func extractUsageAndContentFromStreamData(data []byte, checkStopReason bool) *PassthroughResult {
+func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
 	trimmedData := bytes.TrimSpace(data)
 	if bytes.HasPrefix(trimmedData, []byte("{")) && common.Unmarshal(trimmedData, &map[string]interface{}{}) == nil {
-		return extractUsageAndContentFromResponse(trimmedData, checkStopReason)
+		return extractUsageAndContentFromResponse(trimmedData)
 	}
 
 	result := &PassthroughResult{}
@@ -266,7 +308,6 @@ func extractUsageAndContentFromStreamData(data []byte, checkStopReason bool) *Pa
 			}
 			// 累积所有 delta.content 与 text
 			hasChunkContent := false
-			chunkContent := streamResp.Text
 			if streamResp.Text != "" {
 				contentBuilder.WriteString(streamResp.Text)
 				hasChunkContent = true
@@ -274,12 +315,10 @@ func extractUsageAndContentFromStreamData(data []byte, checkStopReason bool) *Pa
 			for _, choice := range streamResp.Choices {
 				if choice.Delta.Content != "" {
 					contentBuilder.WriteString(choice.Delta.Content)
-					chunkContent += choice.Delta.Content
 					hasChunkContent = true
 				}
 				if choice.Text != "" {
 					contentBuilder.WriteString(choice.Text)
-					chunkContent += choice.Text
 					hasChunkContent = true
 				}
 			}
@@ -287,12 +326,11 @@ func extractUsageAndContentFromStreamData(data []byte, checkStopReason bool) *Pa
 				for _, node := range streamResp.Nodes {
 					if node.Content != "" {
 						contentBuilder.WriteString(node.Content)
-						chunkContent += node.Content
 					}
 				}
 			}
-			if checkStopReason {
-				markStopReasonError(result, streamResp.StopReason, chunkContent)
+			if !isJSONNullRaw(streamResp.StopReason) {
+				result.UpstreamStopReason = string(bytes.TrimSpace(streamResp.StopReason))
 			}
 		}
 	}
@@ -314,7 +352,7 @@ func extractUsageAndContentFromStreamData(data []byte, checkStopReason bool) *Pa
 }
 
 // extractUsageAndContentFromResponse 从非流式响应中提取 usage 和内容
-func extractUsageAndContentFromResponse(responseBody []byte, checkStopReason bool) *PassthroughResult {
+func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult {
 	result := &PassthroughResult{}
 
 	var response struct {
@@ -362,8 +400,8 @@ func extractUsageAndContentFromResponse(responseBody []byte, checkStopReason boo
 				}
 			}
 		}
-		if checkStopReason {
-			markStopReasonError(result, response.StopReason, result.ResponseContent)
+		if !isJSONNullRaw(response.StopReason) {
+			result.UpstreamStopReason = string(bytes.TrimSpace(response.StopReason))
 		}
 	}
 	result.ResponseBody = string(responseBody)
@@ -399,37 +437,6 @@ func detectPassthroughErrorResponse(responseBody []byte, statusCode int) *types.
 	return types.NewOpenAIError(errors.New(message), types.ErrorCodeBadResponseBody, statusCode, types.ErrOptionWithSkipRetry())
 }
 
-func markStopReasonError(result *PassthroughResult, stopReason json.RawMessage, message string) {
-	if result == nil || isJSONNullRaw(stopReason) || !strings.Contains(message, "⚠️") {
-		return
-	}
-	result.UpstreamError = true
-	result.UpstreamStopReason = string(bytes.TrimSpace(stopReason))
-	errMsg := extractWarningSegment(message)
-	if errMsg == "" {
-		errMsg = fmt.Sprintf("upstream stop_reason=%s", result.UpstreamStopReason)
-	}
-	result.UpstreamErrorMessage = errMsg
-}
-
-// extractWarningSegment 从可能包含累积正文的 message 中，只截取 ⚠️ 标记的错误片段，
-// 避免把流式累积的正常 text 当作错误详情一起写入日志。
-func extractWarningSegment(message string) string {
-	idx := strings.Index(message, "⚠️")
-	if idx < 0 {
-		return ""
-	}
-	return strings.TrimSpace(message[idx:])
-}
-
-func markAugmentStatusError(result *PassthroughResult, augmentStatus string) {
-	if result == nil || !isAugmentStatusFailure(augmentStatus) {
-		return
-	}
-	result.UpstreamError = true
-	result.UpstreamErrorMessage = "upstream X-Augment-Status=500"
-}
-
 func isAugmentStatusFailure(augmentStatus string) bool {
 	return strings.TrimSpace(augmentStatus) == "500"
 }
@@ -441,14 +448,14 @@ func isJSONNullRaw(raw json.RawMessage) bool {
 
 // GetPassthroughResult 从响应中提取完整结果
 func GetPassthroughResult(responseBody []byte, isStream bool) *PassthroughResult {
-	return getPassthroughResult(responseBody, isStream, true)
+	return getPassthroughResult(responseBody, isStream)
 }
 
-func getPassthroughResult(responseBody []byte, isStream bool, checkStopReason bool) *PassthroughResult {
+func getPassthroughResult(responseBody []byte, isStream bool) *PassthroughResult {
 	if isStream {
-		return extractUsageAndContentFromStreamData(responseBody, checkStopReason)
+		return extractUsageAndContentFromStreamData(responseBody)
 	}
-	return extractUsageAndContentFromResponse(responseBody, checkStopReason)
+	return extractUsageAndContentFromResponse(responseBody)
 }
 
 // DoPassthroughRequest 执行传透请求（供外部调用）

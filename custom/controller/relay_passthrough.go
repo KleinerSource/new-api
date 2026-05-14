@@ -426,11 +426,7 @@ func recordPassthroughUpstreamErrorLog(ctx *gin.Context, relayInfo *relaycommon.
 
 	content := ""
 	if result != nil {
-		if msg := strings.TrimSpace(result.UpstreamErrorMessage); msg != "" {
-			content = msg
-		} else {
-			content = strings.TrimSpace(result.ResponseContent)
-		}
+		content = strings.TrimSpace(result.UpstreamErrorMessage)
 	}
 
 	other := make(map[string]interface{})
