@@ -13,18 +13,21 @@ const (
 	BillingModeTieredExpr = "tiered_expr"
 	BillingModeField      = "billing_mode"
 	BillingExprField      = "billing_expr"
+	MinimumChargeField    = "minimum_charge"
 )
 
 // BillingSetting is managed by config.GlobalConfig.Register.
-// DB keys: billing_setting.billing_mode, billing_setting.billing_expr
+// DB keys: billing_setting.billing_mode, billing_setting.billing_expr, billing_setting.minimum_charge
 type BillingSetting struct {
-	BillingMode map[string]string `json:"billing_mode"`
-	BillingExpr map[string]string `json:"billing_expr"`
+	BillingMode   map[string]string  `json:"billing_mode"`
+	BillingExpr   map[string]string  `json:"billing_expr"`
+	MinimumCharge map[string]float64 `json:"minimum_charge"`
 }
 
 var billingSetting = BillingSetting{
-	BillingMode: make(map[string]string),
-	BillingExpr: make(map[string]string),
+	BillingMode:   make(map[string]string),
+	BillingExpr:   make(map[string]string),
+	MinimumCharge: make(map[string]float64),
 }
 
 func init() {
@@ -55,13 +58,30 @@ func GetBillingExprCopy() map[string]string {
 	return lo.Assign(billingSetting.BillingExpr)
 }
 
+// GetMinimumCharge 返回模型的保底消费（单位：$）以及是否配置。
+// 未配置或配置为 <= 0 时返回 (0, false)。
+func GetMinimumCharge(model string) (float64, bool) {
+	v, ok := billingSetting.MinimumCharge[model]
+	if !ok || v <= 0 {
+		return 0, false
+	}
+	return v, true
+}
+
+func GetMinimumChargeCopy() map[string]float64 {
+	return lo.Assign(billingSetting.MinimumCharge)
+}
+
 func GetPricingSyncData(base map[string]any) map[string]any {
-	extra := make(map[string]any, 2)
+	extra := make(map[string]any, 3)
 	if modes := GetBillingModeCopy(); len(modes) > 0 {
 		extra[BillingModeField] = modes
 	}
 	if exprs := GetBillingExprCopy(); len(exprs) > 0 {
 		extra[BillingExprField] = exprs
+	}
+	if minCharges := GetMinimumChargeCopy(); len(minCharges) > 0 {
+		extra[MinimumChargeField] = minCharges
 	}
 	return lo.Assign(base, extra)
 }

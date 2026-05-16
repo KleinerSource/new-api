@@ -214,6 +214,7 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 		logContent = fmt.Sprintf("模型价格 %.2f，分组倍率 %.2f", modelPrice, groupRatio)
 	}
 
+	var minChargeResult MinimumChargeResult
 	// record all the consume log even if quota is 0
 	if totalTokens == 0 {
 		// in this case, must be some error happened
@@ -223,6 +224,13 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 		logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, "+
 			"tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, modelName, relayInfo.FinalPreConsumedQuota))
 	} else {
+		quota, minChargeResult = ApplyMinimumCharge(relayInfo, quota, totalTokens)
+		if minChargeResult.Applied {
+			logContent += fmt.Sprintf("，触发保底消费 $%g（原计费 %s → 保底 %s）",
+				minChargeResult.MinCharge,
+				logger.FormatQuota(minChargeResult.OriginalQuota),
+				logger.FormatQuota(minChargeResult.MinQuota))
+		}
 		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, quota)
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, quota)
 	}
@@ -239,6 +247,12 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 		completionRatio.InexactFloat64(), audioRatio.InexactFloat64(), audioCompletionRatio.InexactFloat64(), modelPrice, relayInfo.PriceData.GroupRatioInfo.GroupSpecialRatio)
 	if tieredResult != nil {
 		InjectTieredBillingInfo(other, relayInfo, tieredResult)
+	}
+	if minChargeResult.Applied {
+		other["min_charge_applied"] = true
+		other["min_charge_price"] = minChargeResult.MinCharge
+		other["min_charge_quota"] = minChargeResult.MinQuota
+		other["min_charge_original_quota"] = minChargeResult.OriginalQuota
 	}
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,
@@ -335,6 +349,7 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 		logContent = fmt.Sprintf("模型价格 %.2f，分组倍率 %.2f", modelPrice, groupRatio)
 	}
 
+	var minChargeResult MinimumChargeResult
 	// record all the consume log even if quota is 0
 	if totalTokens == 0 {
 		// in this case, must be some error happened
@@ -344,6 +359,13 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 		logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, "+
 			"tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, relayInfo.OriginModelName, relayInfo.FinalPreConsumedQuota))
 	} else {
+		quota, minChargeResult = ApplyMinimumCharge(relayInfo, quota, totalTokens)
+		if minChargeResult.Applied {
+			logContent += fmt.Sprintf("，触发保底消费 $%g（原计费 %s → 保底 %s）",
+				minChargeResult.MinCharge,
+				logger.FormatQuota(minChargeResult.OriginalQuota),
+				logger.FormatQuota(minChargeResult.MinQuota))
+		}
 		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, quota)
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, quota)
 	}
@@ -360,6 +382,12 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 		completionRatio.InexactFloat64(), audioRatio.InexactFloat64(), audioCompletionRatio.InexactFloat64(), modelPrice, relayInfo.PriceData.GroupRatioInfo.GroupSpecialRatio)
 	if tieredResult != nil {
 		InjectTieredBillingInfo(other, relayInfo, tieredResult)
+	}
+	if minChargeResult.Applied {
+		other["min_charge_applied"] = true
+		other["min_charge_price"] = minChargeResult.MinCharge
+		other["min_charge_quota"] = minChargeResult.MinQuota
+		other["min_charge_original_quota"] = minChargeResult.OriginalQuota
 	}
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,

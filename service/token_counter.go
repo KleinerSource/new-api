@@ -382,6 +382,12 @@ func CountAudioTokenInput(audioBase64 string, audioFormat string) (int, error) {
 	return int(duration / 60 * 100 / 0.06), nil
 }
 
+// GetImageTokenForPassthrough 计算图片 token（供透传模式使用）
+// 这是 getImageToken 的公开版本，用于 custom/ 模块外部调用。
+func GetImageTokenForPassthrough(c *gin.Context, fileMeta *types.FileMeta, model string) (int, error) {
+	return getImageToken(c, fileMeta, model, true)
+}
+
 func CountAudioTokenOutput(audioBase64 string, audioFormat string) (int, error) {
 	if audioBase64 == "" {
 		return 0, nil
