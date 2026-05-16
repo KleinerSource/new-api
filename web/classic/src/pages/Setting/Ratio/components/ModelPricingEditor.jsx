@@ -700,6 +700,30 @@ export default function ModelPricingEditor({
 
                 <Card
                   bodyStyle={{ padding: 16 }}
+                  style={{
+                    marginBottom: 16,
+                    background: 'var(--semi-color-fill-0)',
+                  }}
+                >
+                  <div className='font-medium mb-1'>{t('保底消费')}</div>
+                  <div className='text-xs text-gray-500 mb-3'>
+                    {t(
+                      '当一次请求按当前计费规则算出的费用低于保底值时，按保底值扣费。适用于按量、按次和表达式三种计费。留空表示不启用。上游异常或免费模型不会触发保底。',
+                    )}
+                  </div>
+                  <PriceInput
+                    label={t('保底消费')}
+                    value={selectedModel.minimumCharge}
+                    placeholder={t('输入每次请求的最低扣费金额，例如 0.01')}
+                    suffix={t('$/次')}
+                    onChange={(value) =>
+                      handleNumericFieldChange('minimumCharge', value)
+                    }
+                  />
+                </Card>
+
+                <Card
+                  bodyStyle={{ padding: 16 }}
                   style={{ background: 'var(--semi-color-fill-0)' }}
                 >
                   <div className='font-medium mb-3'>{t('保存预览')}</div>
