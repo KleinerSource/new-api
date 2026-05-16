@@ -1,0 +1,464 @@
+package relay
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay"
+	"github.com/QuantumNous/new-api/relay/channel"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/types"
+
+	"github.com/gin-gonic/gin"
+)
+
+// PassthroughEndpoint 透传端点路径
+const PassthroughEndpoint = "/chat-stream"
+const augmentStatusHeader = "X-Augment-Status"
+
+// PassthroughHelperWithUsage 传透模式处理器（带 usage 和内容提取）
+// 自定义 URL 构建逻辑：始终使用 base_url + /chat-stream，不依赖 Adaptor.GetRequestURL()
+func PassthroughHelperWithUsage(c *gin.Context, info *relaycommon.RelayInfo) (*PassthroughResult, *types.NewAPIError) {
+	info.InitChannelMeta(c)
+
+	adaptor := relay.GetAdaptor(info.ApiType)
+	if adaptor == nil {
+		return nil, types.NewError(fmt.Errorf("invalid api type: %d", info.ApiType), types.ErrorCodeInvalidApiType, types.ErrOptionWithSkipRetry())
+	}
+	adaptor.Init(info)
+
+	bodyStorage, err := common.GetBodyStorage(c)
+	if err != nil {
+		if common.IsRequestBodyTooLargeError(err) || errors.Is(err, common.ErrRequestBodyTooLarge) {
+			return nil, types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusRequestEntityTooLarge, types.ErrOptionWithSkipRetry())
+		}
+		return nil, types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+
+	if common.DebugEnabled {
+		if debugBytes, bErr := bodyStorage.Bytes(); bErr == nil {
+			logger.LogDebug(c, fmt.Sprintf("passthrough request body: %s", string(debugBytes)))
+		}
+	}
+
+	if _, seekErr := bodyStorage.Seek(0, io.SeekStart); seekErr != nil {
+		return nil, types.NewErrorWithStatusCode(seekErr, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+
+	// 使用自定义请求发送逻辑，绕过 Adaptor.GetRequestURL()
+	resp, err := doPassthroughRequestWithCustomURL(c, adaptor, info, bodyStorage)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+	}
+
+	var httpResp *http.Response
+	if resp != nil {
+		httpResp = resp
+		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
+
+		if httpResp.StatusCode != http.StatusOK {
+			newApiErr := service.RelayErrorHandler(c.Request.Context(), httpResp, false)
+			return nil, newApiErr
+		}
+	}
+
+	return passthroughResponseWithUsage(c, httpResp, info)
+}
+
+// doPassthroughRequestWithCustomURL 使用自定义 URL 构建逻辑发送透传请求
+// URL 构建规则：base_url + /chat-stream
+// 这样可以让渠道测试使用标准的 /v1/chat/completions，而透传请求使用 /chat-stream
+func doPassthroughRequestWithCustomURL(c *gin.Context, adaptor channel.Adaptor, info *relaycommon.RelayInfo, body io.Reader) (*http.Response, error) {
+	// 1. 构建 URL：base_url + /chat-stream
+	baseURL := strings.TrimSuffix(info.ChannelBaseUrl, "/")
+	fullRequestURL := baseURL + PassthroughEndpoint
+
+	if common.DebugEnabled {
+		logger.LogDebug(c, fmt.Sprintf("passthrough custom URL: %s (base: %s)", fullRequestURL, info.ChannelBaseUrl))
+	}
+
+	// 2. 创建 HTTP 请求
+	req, err := http.NewRequest(c.Request.Method, fullRequestURL, common.ReaderOnly(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request failed: %w", err)
+	}
+
+	// 3. 处理请求头覆盖（支持渠道配置的 headers_override）
+	headers := req.Header
+	if info.HeadersOverride != nil {
+		for k, v := range info.HeadersOverride {
+			if str, ok := v.(string); ok {
+				// 替换支持的变量
+				if strings.Contains(str, "{api_key}") {
+					str = strings.ReplaceAll(str, "{api_key}", info.ApiKey)
+				}
+				headers.Set(k, str)
+			}
+		}
+	}
+
+	// 4. 使用 Adaptor 设置请求头（保留认证逻辑）
+	if err := adaptor.SetupRequestHeader(c, &headers, info); err != nil {
+		return nil, fmt.Errorf("setup request header failed: %w", err)
+	}
+
+	// 5. 发送请求
+	return channel.DoRequest(c, req, info)
+}
+
+// passthroughResponseWithUsage 透传响应并提取 usage 和内容信息
+func passthroughResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*PassthroughResult, *types.NewAPIError) {
+	if resp == nil || resp.Body == nil {
+		return nil, types.NewOpenAIError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
+	}
+
+	defer service.CloseResponseBodyGracefully(resp)
+
+	for key, values := range resp.Header {
+		for _, value := range values {
+			c.Writer.Header().Add(key, value)
+		}
+	}
+
+	augmentStatus := resp.Header.Get(augmentStatusHeader)
+
+	var result *PassthroughResult
+	var apiErr *types.NewAPIError
+	if info.IsStream {
+		result, apiErr = passthroughStreamResponseWithUsage(c, resp, info)
+	} else {
+		result, apiErr = passthroughNonStreamResponseWithUsage(c, resp, info)
+	}
+	classifyUpstreamError(result, augmentStatus)
+	return result, apiErr
+}
+
+// classifyUpstreamError 按互斥优先级判定上游错误：
+//  1. X-Augment-Status=500：标错，直接以 ResponseContent 作为错误内容；为空则兜底文案；
+//  2. 否则若 stop_reason 非 null 且内容含 ⚠️ ... ⚠️：标错并截取该段；
+//  3. 都不命中：维持成功状态。
+func classifyUpstreamError(result *PassthroughResult, augmentStatus string) {
+	if result == nil {
+		return
+	}
+	if isAugmentStatusFailure(augmentStatus) {
+		result.UpstreamError = true
+		if content := strings.TrimSpace(result.ResponseContent); content != "" {
+			result.UpstreamErrorMessage = content
+		} else {
+			result.UpstreamErrorMessage = "upstream X-Augment-Status=500"
+		}
+		return
+	}
+	if result.UpstreamStopReason == "" {
+		return
+	}
+	msg := extractWarningSegment(result.ResponseContent)
+	if msg == "" {
+		return
+	}
+	result.UpstreamError = true
+	result.UpstreamErrorMessage = msg
+}
+
+// extractWarningSegment 从可能包含累积正文的 message 中，只截取末尾 ⚠️ 标记的错误片段。
+// 优先匹配末尾一对 ⚠️ ... ⚠️；若只有一个 ⚠️，则截取从最后一个 ⚠️ 起到末尾。
+func extractWarningSegment(message string) string {
+	const marker = "⚠️"
+	end := strings.LastIndex(message, marker)
+	if end < 0 {
+		return ""
+	}
+	start := strings.LastIndex(message[:end], marker)
+	if start < 0 {
+		start = end
+	}
+	return strings.TrimSpace(message[start:])
+}
+
+// passthroughStreamResponseWithUsage 流式响应透传（带 usage 和内容提取）
+func passthroughStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*PassthroughResult, *types.NewAPIError) {
+	helper.SetEventStreamHeaders(c)
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		logger.LogWarn(c, "streaming not supported, falling back to buffered response")
+		responseBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
+		}
+		c.Writer.Write(responseBody)
+		return getPassthroughResult(responseBody, true), nil
+	}
+
+	var allData bytes.Buffer
+	buffer := make([]byte, 4096)
+	for {
+		n, err := resp.Body.Read(buffer)
+		if n > 0 {
+			info.SetFirstResponseTime()
+			if _, writeErr := c.Writer.Write(buffer[:n]); writeErr != nil {
+				logger.LogError(c, "passthrough stream write error: "+writeErr.Error())
+				break
+			}
+			flusher.Flush()
+			allData.Write(buffer[:n])
+		}
+		if err != nil {
+			if err != io.EOF {
+				logger.LogError(c, "passthrough stream read error: "+err.Error())
+			}
+			break
+		}
+	}
+
+	result := getPassthroughResult(allData.Bytes(), true)
+	return result, nil
+}
+
+// passthroughNonStreamResponseWithUsage 非流式响应透传（带 usage 和内容提取）
+func passthroughNonStreamResponseWithUsage(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*PassthroughResult, *types.NewAPIError) {
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
+	}
+
+	info.SetFirstResponseTime()
+
+	if common.DebugEnabled {
+		logger.LogDebug(c, fmt.Sprintf("passthrough response body: %s", string(responseBody)))
+	}
+
+	if apiErr := detectPassthroughErrorResponse(responseBody, resp.StatusCode); apiErr != nil {
+		return nil, apiErr
+	}
+
+	result := getPassthroughResult(responseBody, false)
+	service.IOCopyBytesGracefully(c, resp, responseBody)
+	return result, nil
+}
+
+// PassthroughResult 传透模式结果，包含 usage 和响应内容
+type PassthroughResult struct {
+	Usage                *dto.Usage
+	ResponseContent      string // 响应中的文本内容，用于本地计算 token
+	ResponseBody         string
+	UpstreamError        bool
+	UpstreamErrorMessage string
+	UpstreamStopReason   string
+}
+
+// extractUsageAndContentFromStreamData 从流式数据中提取 usage 和内容
+func extractUsageAndContentFromStreamData(data []byte) *PassthroughResult {
+	trimmedData := bytes.TrimSpace(data)
+	if bytes.HasPrefix(trimmedData, []byte("{")) && common.Unmarshal(trimmedData, &map[string]interface{}{}) == nil {
+		return extractUsageAndContentFromResponse(trimmedData)
+	}
+
+	result := &PassthroughResult{}
+	var contentBuilder bytes.Buffer
+
+	lines := bytes.Split(data, []byte("\n"))
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		var jsonData []byte
+		if bytes.HasPrefix(line, []byte("data: ")) {
+			jsonData = bytes.TrimPrefix(line, []byte("data: "))
+		} else if bytes.HasPrefix(line, []byte("{")) {
+			jsonData = line
+		} else {
+			continue
+		}
+		if bytes.Equal(jsonData, []byte("[DONE]")) {
+			continue
+		}
+
+		// 支持 usage 和 token_usage 两种字段名
+		var streamResp struct {
+			Usage      *dto.Usage      `json:"usage"`
+			TokenUsage *dto.Usage      `json:"token_usage"`
+			Text       string          `json:"text"`
+			StopReason json.RawMessage `json:"stop_reason"`
+			Nodes      []struct {
+				Content string `json:"content"`
+			} `json:"nodes"`
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+				Text string `json:"text"`
+			} `json:"choices"`
+		}
+		if err := common.Unmarshal(jsonData, &streamResp); err == nil {
+			// 优先使用 usage，其次使用 token_usage
+			if streamResp.Usage != nil && (streamResp.Usage.PromptTokens > 0 || streamResp.Usage.CompletionTokens > 0) {
+				result.Usage = streamResp.Usage
+			} else if streamResp.TokenUsage != nil && (streamResp.TokenUsage.PromptTokens > 0 || streamResp.TokenUsage.CompletionTokens > 0) {
+				result.Usage = streamResp.TokenUsage
+			}
+			// 累积所有 delta.content 与 text
+			hasChunkContent := false
+			if streamResp.Text != "" {
+				contentBuilder.WriteString(streamResp.Text)
+				hasChunkContent = true
+			}
+			for _, choice := range streamResp.Choices {
+				if choice.Delta.Content != "" {
+					contentBuilder.WriteString(choice.Delta.Content)
+					hasChunkContent = true
+				}
+				if choice.Text != "" {
+					contentBuilder.WriteString(choice.Text)
+					hasChunkContent = true
+				}
+			}
+			if !hasChunkContent {
+				for _, node := range streamResp.Nodes {
+					if node.Content != "" {
+						contentBuilder.WriteString(node.Content)
+					}
+				}
+			}
+			if !isJSONNullRaw(streamResp.StopReason) {
+				result.UpstreamStopReason = string(bytes.TrimSpace(streamResp.StopReason))
+			}
+		}
+	}
+
+	result.ResponseContent = contentBuilder.String()
+	result.ResponseBody = string(data)
+
+	// 调试日志
+	if common.DebugEnabled {
+		common.SysLog(fmt.Sprintf("[Passthrough Stream] ResponseContent length: %d, has usage: %v",
+			len(result.ResponseContent), result.Usage != nil))
+		if result.Usage != nil {
+			common.SysLog(fmt.Sprintf("[Passthrough Stream] Usage: prompt=%d, completion=%d",
+				result.Usage.PromptTokens, result.Usage.CompletionTokens))
+		}
+	}
+
+	return result
+}
+
+// extractUsageAndContentFromResponse 从非流式响应中提取 usage 和内容
+func extractUsageAndContentFromResponse(responseBody []byte) *PassthroughResult {
+	result := &PassthroughResult{}
+
+	var response struct {
+		Usage      *dto.Usage      `json:"usage"`
+		TokenUsage *dto.Usage      `json:"token_usage"`
+		Text       string          `json:"text"`
+		StopReason json.RawMessage `json:"stop_reason"`
+		Nodes      []struct {
+			Content string `json:"content"`
+		} `json:"nodes"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Text string `json:"text"`
+		} `json:"choices"`
+	}
+
+	if err := common.Unmarshal(responseBody, &response); err == nil {
+		// 优先使用 usage，其次使用 token_usage
+		if response.Usage != nil && (response.Usage.PromptTokens > 0 || response.Usage.CompletionTokens > 0) {
+			result.Usage = response.Usage
+		} else if response.TokenUsage != nil && (response.TokenUsage.PromptTokens > 0 || response.TokenUsage.CompletionTokens > 0) {
+			result.Usage = response.TokenUsage
+		}
+		hasResponseContent := false
+		if response.Text != "" {
+			result.ResponseContent += response.Text
+			hasResponseContent = true
+		}
+		for _, choice := range response.Choices {
+			if choice.Message.Content != "" {
+				result.ResponseContent += choice.Message.Content
+				hasResponseContent = true
+			}
+			if choice.Text != "" {
+				result.ResponseContent += choice.Text
+				hasResponseContent = true
+			}
+		}
+		if !hasResponseContent {
+			for _, node := range response.Nodes {
+				if node.Content != "" {
+					result.ResponseContent += node.Content
+				}
+			}
+		}
+		if !isJSONNullRaw(response.StopReason) {
+			result.UpstreamStopReason = string(bytes.TrimSpace(response.StopReason))
+		}
+	}
+	result.ResponseBody = string(responseBody)
+
+	// 调试日志
+	if common.DebugEnabled {
+		common.SysLog(fmt.Sprintf("[Passthrough NonStream] ResponseContent length: %d, has usage: %v",
+			len(result.ResponseContent), result.Usage != nil))
+		if result.Usage != nil {
+			common.SysLog(fmt.Sprintf("[Passthrough NonStream] Usage: prompt=%d, completion=%d",
+				result.Usage.PromptTokens, result.Usage.CompletionTokens))
+		}
+	}
+
+	return result
+}
+
+func detectPassthroughErrorResponse(responseBody []byte, statusCode int) *types.NewAPIError {
+	var errResponse dto.GeneralErrorResponse
+	if err := common.Unmarshal(responseBody, &errResponse); err != nil {
+		return nil
+	}
+	if isJSONNullRaw(errResponse.Error) {
+		return nil
+	}
+	if openAIError := errResponse.TryToOpenAIError(); openAIError != nil {
+		return types.WithOpenAIError(*openAIError, statusCode, types.ErrOptionWithSkipRetry())
+	}
+	message := errResponse.ToMessage()
+	if message == "" || message == "null" {
+		return nil
+	}
+	return types.NewOpenAIError(errors.New(message), types.ErrorCodeBadResponseBody, statusCode, types.ErrOptionWithSkipRetry())
+}
+
+func isAugmentStatusFailure(augmentStatus string) bool {
+	return strings.TrimSpace(augmentStatus) == "500"
+}
+
+func isJSONNullRaw(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
+}
+
+// GetPassthroughResult 从响应中提取完整结果
+func GetPassthroughResult(responseBody []byte, isStream bool) *PassthroughResult {
+	return getPassthroughResult(responseBody, isStream)
+}
+
+func getPassthroughResult(responseBody []byte, isStream bool) *PassthroughResult {
+	if isStream {
+		return extractUsageAndContentFromStreamData(responseBody)
+	}
+	return extractUsageAndContentFromResponse(responseBody)
+}
+
+// DoPassthroughRequest 执行传透请求（供外部调用）
+func DoPassthroughRequest(adaptor channel.Adaptor, c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (*http.Response, error) {
+	return channel.DoApiRequest(adaptor, c, info, requestBody)
+}
