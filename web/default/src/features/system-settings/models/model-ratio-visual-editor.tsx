@@ -77,6 +77,7 @@ type ModelRatioVisualEditorProps = {
   audioCompletionRatio: string
   billingMode: string
   billingExpr: string
+  minimumCharge: string
   onChange: (field: string, value: string) => void
 }
 
@@ -93,6 +94,7 @@ type ModelRow = {
   billingMode?: string
   billingExpr?: string
   requestRuleExpr?: string
+  minimumCharge?: string
   hasConflict: boolean
 }
 
@@ -207,6 +209,7 @@ export const ModelRatioVisualEditor = memo(
     audioCompletionRatio,
     billingMode,
     billingExpr,
+    minimumCharge,
     onChange,
   }: ModelRatioVisualEditorProps) {
     const { t } = useTranslation()
@@ -308,6 +311,13 @@ export const ModelRatioVisualEditor = memo(
           context: 'billing expression',
         }
       )
+      const minimumChargeMap = safeJsonParse<Record<string, number>>(
+        minimumCharge,
+        {
+          fallback: {},
+          context: 'minimum charge',
+        }
+      )
 
       const modelNames = new Set([
         ...Object.keys(priceMap),
@@ -320,6 +330,7 @@ export const ModelRatioVisualEditor = memo(
         ...Object.keys(audioCompletionMap),
         ...Object.keys(billingModeMap),
         ...Object.keys(billingExprMap),
+        ...Object.keys(minimumChargeMap),
       ])
 
       const modelData: ModelRow[] = Array.from(modelNames).map((name) => {
@@ -331,6 +342,7 @@ export const ModelRatioVisualEditor = memo(
         const image = imageMap[name]?.toString() || ''
         const audio = audioMap[name]?.toString() || ''
         const audioCompletion = audioCompletionMap[name]?.toString() || ''
+        const minCharge = minimumChargeMap[name]?.toString() || ''
 
         const modeForModel = billingModeMap[name]
         if (modeForModel === 'tiered_expr') {
@@ -353,6 +365,7 @@ export const ModelRatioVisualEditor = memo(
             imageRatio: image,
             audioRatio: audio,
             audioCompletionRatio: audioCompletion,
+            minimumCharge: minCharge,
             hasConflict: false,
           }
         }
@@ -367,6 +380,7 @@ export const ModelRatioVisualEditor = memo(
           imageRatio: image,
           audioRatio: audio,
           audioCompletionRatio: audioCompletion,
+          minimumCharge: minCharge,
           billingMode: price !== '' ? 'per-request' : 'per-token',
           hasConflict:
             price !== '' &&
@@ -392,6 +406,7 @@ export const ModelRatioVisualEditor = memo(
       audioCompletionRatio,
       billingMode,
       billingExpr,
+      minimumCharge,
     ])
 
     const modeCounts = useMemo(
@@ -435,6 +450,7 @@ export const ModelRatioVisualEditor = memo(
                 : 'per-token',
           billingExpr: model.billingExpr,
           requestRuleExpr: model.requestRuleExpr,
+          minimumCharge: model.minimumCharge,
         })
         setEditorOpen(true)
         if (isMobile) setSheetOpen(true)
@@ -512,6 +528,10 @@ export const ModelRatioVisualEditor = memo(
           billingExpr,
           { fallback: {}, silent: true }
         )
+        const minimumChargeMap = safeJsonParse<Record<string, number>>(
+          minimumCharge,
+          { fallback: {}, silent: true }
+        )
 
         delete priceMap[name]
         delete ratioMap[name]
@@ -523,6 +543,7 @@ export const ModelRatioVisualEditor = memo(
         delete audioCompletionMap[name]
         delete billingModeMap[name]
         delete billingExprMap[name]
+        delete minimumChargeMap[name]
 
         onChange('ModelPrice', JSON.stringify(priceMap, null, 2))
         onChange('ModelRatio', JSON.stringify(ratioMap, null, 2))
@@ -543,6 +564,10 @@ export const ModelRatioVisualEditor = memo(
           'billing_setting.billing_expr',
           JSON.stringify(billingExprMap, null, 2)
         )
+        onChange(
+          'billing_setting.minimum_charge',
+          JSON.stringify(minimumChargeMap, null, 2)
+        )
       },
       [
         modelPrice,
@@ -555,6 +580,7 @@ export const ModelRatioVisualEditor = memo(
         audioCompletionRatio,
         billingMode,
         billingExpr,
+        minimumCharge,
         onChange,
       ]
     )
@@ -747,6 +773,10 @@ export const ModelRatioVisualEditor = memo(
           billingExpr,
           { fallback: {}, silent: true }
         )
+        const minimumChargeMap = safeJsonParse<Record<string, number>>(
+          minimumCharge,
+          { fallback: {}, silent: true }
+        )
 
         const setIfPresent = (
           target: Record<string, number>,
@@ -769,6 +799,7 @@ export const ModelRatioVisualEditor = memo(
           delete audioCompletionMap[name]
           delete billingModeMap[name]
           delete billingExprMap[name]
+          delete minimumChargeMap[name]
 
           if (data.billingMode === 'tiered_expr') {
             const combined = combineBillingExpr(
@@ -802,6 +833,8 @@ export const ModelRatioVisualEditor = memo(
             setIfPresent(audioMap, name, data.audioRatio)
             setIfPresent(audioCompletionMap, name, data.audioCompletionRatio)
           }
+
+          setIfPresent(minimumChargeMap, name, data.minimumCharge)
         })
 
         onChange('ModelPrice', JSON.stringify(priceMap, null, 2))
@@ -823,6 +856,10 @@ export const ModelRatioVisualEditor = memo(
           'billing_setting.billing_expr',
           JSON.stringify(billingExprMap, null, 2)
         )
+        onChange(
+          'billing_setting.minimum_charge',
+          JSON.stringify(minimumChargeMap, null, 2)
+        )
       },
       [
         modelPrice,
@@ -835,6 +872,7 @@ export const ModelRatioVisualEditor = memo(
         audioCompletionRatio,
         billingMode,
         billingExpr,
+        minimumCharge,
         onChange,
       ]
     )

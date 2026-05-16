@@ -130,6 +130,15 @@ const modelSchema = z.object({
       })
     }
   }),
+  MinimumCharge: z.string().superRefine((value, ctx) => {
+    const result = validateJsonString(value)
+    if (!result.valid) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: result.message || 'Invalid JSON',
+      })
+    }
+  }),
 })
 
 const groupSchema = z.object({
@@ -251,6 +260,7 @@ export function RatioSettingsCard({
     ExposeRatioEnabled: modelDefaults.ExposeRatioEnabled,
     BillingMode: normalizeJsonString(modelDefaults.BillingMode),
     BillingExpr: normalizeJsonString(modelDefaults.BillingExpr),
+    MinimumCharge: normalizeJsonString(modelDefaults.MinimumCharge),
   })
 
   const groupNormalizedDefaults = useRef({
@@ -282,6 +292,7 @@ export function RatioSettingsCard({
       ),
       BillingMode: formatJsonForTextarea(modelDefaults.BillingMode),
       BillingExpr: formatJsonForTextarea(modelDefaults.BillingExpr),
+      MinimumCharge: formatJsonForTextarea(modelDefaults.MinimumCharge),
     },
   })
 
@@ -316,6 +327,7 @@ export function RatioSettingsCard({
       ExposeRatioEnabled: modelDefaults.ExposeRatioEnabled,
       BillingMode: normalizeJsonString(modelDefaults.BillingMode),
       BillingExpr: normalizeJsonString(modelDefaults.BillingExpr),
+      MinimumCharge: normalizeJsonString(modelDefaults.MinimumCharge),
     }
 
     modelForm.reset({
@@ -332,6 +344,7 @@ export function RatioSettingsCard({
       ),
       BillingMode: formatJsonForTextarea(modelDefaults.BillingMode),
       BillingExpr: formatJsonForTextarea(modelDefaults.BillingExpr),
+      MinimumCharge: formatJsonForTextarea(modelDefaults.MinimumCharge),
     })
   }, [modelDefaults, modelForm])
 
@@ -375,11 +388,13 @@ export function RatioSettingsCard({
         ExposeRatioEnabled: values.ExposeRatioEnabled,
         BillingMode: normalizeJsonString(values.BillingMode),
         BillingExpr: normalizeJsonString(values.BillingExpr),
+        MinimumCharge: normalizeJsonString(values.MinimumCharge),
       }
 
       const apiKeyMap: Record<string, string> = {
         BillingMode: 'billing_setting.billing_mode',
         BillingExpr: 'billing_setting.billing_expr',
+        MinimumCharge: 'billing_setting.minimum_charge',
       }
 
       const updates = (
@@ -491,6 +506,7 @@ export function RatioSettingsCard({
           AudioCompletionRatio: modelDefaults.AudioCompletionRatio,
           'billing_setting.billing_mode': modelDefaults.BillingMode,
           'billing_setting.billing_expr': modelDefaults.BillingExpr,
+          'billing_setting.minimum_charge': modelDefaults.MinimumCharge,
         }}
       />
     )

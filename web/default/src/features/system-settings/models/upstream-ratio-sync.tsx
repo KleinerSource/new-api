@@ -71,6 +71,7 @@ type UpstreamRatioSyncProps = {
     AudioCompletionRatio: string
     'billing_setting.billing_mode': string
     'billing_setting.billing_expr': string
+    'billing_setting.minimum_charge': string
   }
 }
 
@@ -99,6 +100,7 @@ function optionKeyBySyncField(ratioType: string): string {
   const explicit: Record<string, string> = {
     billing_mode: 'billing_setting.billing_mode',
     billing_expr: 'billing_setting.billing_expr',
+    minimum_charge: 'billing_setting.minimum_charge',
   }
   if (explicit[ratioType]) return explicit[ratioType]
   return ratioType
@@ -350,6 +352,9 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
       'billing_setting.billing_expr': parseJsonRecord<string>(
         modelRatios['billing_setting.billing_expr']
       ),
+      'billing_setting.minimum_charge': parseJsonRecord<number>(
+        modelRatios['billing_setting.minimum_charge']
+      ),
     }
   }, [modelRatios])
 
@@ -389,6 +394,9 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
         },
         'billing_setting.billing_expr': {
           ...currentRatios['billing_setting.billing_expr'],
+        },
+        'billing_setting.minimum_charge': {
+          ...currentRatios['billing_setting.minimum_charge'],
         },
       }
 

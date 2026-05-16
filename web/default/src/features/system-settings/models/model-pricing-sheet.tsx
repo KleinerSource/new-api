@@ -106,6 +106,7 @@ export type ModelRatioData = {
   billingMode?: PricingMode
   billingExpr?: string
   requestRuleExpr?: string
+  minimumCharge?: string
 }
 
 type ModelPricingSheetProps = {
@@ -429,6 +430,7 @@ export function ModelPricingEditorPanel({
   })
   const [billingExpr, setBillingExpr] = useState('')
   const [requestRuleExpr, setRequestRuleExpr] = useState('')
+  const [minimumCharge, setMinimumCharge] = useState('')
   const [previewOpen, setPreviewOpen] = useState(true)
   const isEditMode = !!editData
 
@@ -471,6 +473,7 @@ export function ModelPricingEditorPanel({
       )
       setBillingExpr(editData.billingExpr || '')
       setRequestRuleExpr(editData.requestRuleExpr || '')
+      setMinimumCharge(editData.minimumCharge || '')
     } else {
       form.reset({
         name: '',
@@ -486,6 +489,7 @@ export function ModelPricingEditorPanel({
       setPricingMode('per-token')
       setBillingExpr('')
       setRequestRuleExpr('')
+      setMinimumCharge('')
     }
 
     setPromptPrice(nextLaneState.promptPrice)
@@ -720,6 +724,7 @@ export function ModelPricingEditorPanel({
       imageRatio: values.imageRatio || '',
       audioRatio: values.audioRatio || '',
       audioCompletionRatio: values.audioCompletionRatio || '',
+      minimumCharge: minimumCharge || '',
     }
 
     if (pricingMode === 'tiered_expr') {
@@ -905,6 +910,34 @@ export function ModelPricingEditorPanel({
                   />
                 </TabsContent>
               </Tabs>
+
+              <FormItem>
+                <FormLabel>{t('Minimum charge')}</FormLabel>
+                <FormControl>
+                  <InputGroup>
+                    <InputGroupAddon>$</InputGroupAddon>
+                    <InputGroupInput
+                      inputMode='decimal'
+                      placeholder='0.01'
+                      value={minimumCharge}
+                      onChange={(event) => {
+                        const value = event.target.value
+                        if (numericDraftRegex.test(value)) {
+                          setMinimumCharge(value)
+                        }
+                      }}
+                    />
+                    <InputGroupAddon align='inline-end'>
+                      {t('per request')}
+                    </InputGroupAddon>
+                  </InputGroup>
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'When the calculated cost is below this floor, charge the floor instead. Applies to per-token, per-request and expression billing. Leave empty to disable. Upstream errors and free models do not trigger the floor.'
+                  )}
+                </FormDescription>
+              </FormItem>
 
               <Collapsible open={previewOpen} onOpenChange={setPreviewOpen}>
                 <CollapsibleTrigger

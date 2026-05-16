@@ -49,11 +49,13 @@ export const SYNC_FIELD_ORDER: RatioType[] = [
   'model_price',
   'billing_mode',
   'billing_expr',
+  'minimum_charge',
 ]
 
 export const NUMERIC_SYNC_FIELDS = new Set<string>([
   ...RATIO_SYNC_FIELDS,
   'model_price',
+  'minimum_charge',
 ])
 
 export function getSyncFieldLabel(
